@@ -95,7 +95,8 @@ class Transformer(nn.Module):
 
 class BAST(nn.Module):
     def __init__(self, *, image_size, patch_size, patch_overlap, num_classes, dim, depth, heads, mlp_dim, pool='mean', channels=2,
-                 dim_head=64, dropout=0.2, emb_dropout=0., binaural_integration='SUB', polar_output=False, share_params=False):
+                 dim_head=64, dropout=0.2, emb_dropout=0., binaural_integration='SUB', polar_output=False, share_params=False,
+                 classify_sound=False, num_classes_cls=1):
         """
         :param image_size: the size of spectrogram, default 129*61.
         :param patch_size: default 16.
@@ -191,6 +192,20 @@ class BAST(nn.Module):
                 nn.Linear(dim, num_classes),
             )
 
+        # Optional classification head (binary by default)
+        self.classify_sound = classify_sound
+        if self.classify_sound:
+            if self.binaural_integration == 'CONCAT':
+                cls_in_dim = dim * 2
+            else:
+                cls_in_dim = dim
+            self.cls_head = nn.Sequential(
+                nn.LayerNorm(cls_in_dim),
+                nn.Linear(cls_in_dim, num_classes_cls),
+            )
+        else:
+            self.cls_head = None
+
     def forward(self, img):
         img_l = img[:, 0:1, :, :]
         img_r = img[:, 1:, :, :]
@@ -221,17 +236,21 @@ class BAST(nn.Module):
         x = self.transformer3(x)
 
         if self.pool == 'mean':
-            x = x.mean(dim=1)
-            x = self.mlp_head(x)
+            feat = x.mean(dim=1)
         elif self.pool == 'cls':
-            x = x[:, 0]
+            feat = x[:, 0]
         elif self.pool == 'conv':
-            x = self.patch_pooling(x[:, 1:])[:, 0, :]
-            x = self.mlp_head(x)
+            feat = self.patch_pooling(x[:, 1:])[:, 0, :]
         elif self.pool == 'linear':
-            x = self.patch_pooling(x[:, 1:].transpose(1, 2))
-            x = self.mlp_head(x[:, :, 0])
-        return x
+            feat = self.patch_pooling(x[:, 1:].transpose(1, 2))[:, :, 0]
+        else:
+            raise ValueError("Unsupported pooling type.")
+
+        loc_out = self.mlp_head(feat)
+        if self.classify_sound and self.cls_head is not None:
+            cls_out = self.cls_head(feat)
+            return loc_out, cls_out
+        return loc_out
 
 
 # --- Variant-switchable BAST model ---
@@ -252,13 +271,16 @@ class BAST_Variant(nn.Module):
                  emb_dropout=0.,
                  binaural_integration='SUB',  # 'SUB', 'ADD', or 'CONCAT'
                  share_params=False,
-                 transformer_variant='vanilla'  # choose between 'vanilla', 'swin' and 'mamba'
+                 transformer_variant='vanilla',  # choose between 'vanilla', 'swin' and 'mamba'
+                 classify_sound=False,
+                 num_classes_cls=1
                  ):
         super().__init__()
         self.pool = pool
         self.binaural_integration = binaural_integration
         self.share_params = share_params
         self.transformer_variant = transformer_variant
+        self.classify_sound = classify_sound
 
         # --- Compute patch grid dimensions and padding ---
         image_height, image_width = image_size
@@ -398,6 +420,15 @@ class BAST_Variant(nn.Module):
             nn.Linear(integration_dim, num_classes),
         )
 
+        # Optional sound classification head
+        if self.classify_sound:
+            self.cls_head = nn.Sequential(
+                nn.LayerNorm(integration_dim),
+                nn.Linear(integration_dim, num_classes_cls),
+            )
+        else:
+            self.cls_head = None
+
     def process_branch(self, img_branch, transformer_module):
         # Shared patch embedding: output shape [B, N, dim]
         x = self.to_patch_embedding(img_branch)
@@ -446,39 +477,41 @@ class BAST_Variant(nn.Module):
         # Integration transformer stage
         x = self.transformer3(x)
 
-        # Pooling and classification head
+        # Pooling to shared feature
         if self.pool == 'mean':
             if self.transformer_variant == 'vanilla':
-                x = x.mean(dim=1)
+                feat = x.mean(dim=1)
             elif self.transformer_variant == 'swin':
-                x = x.mean(dim=(1, 2))  # average over spatial dimensions for swin
+                feat = x.mean(dim=(1, 2))
             elif self.transformer_variant == 'mamba':
-                x = x.mean(dim=(2, 3))
-            x = self.mlp_head(x)
+                feat = x.mean(dim=(2, 3))
+            else:
+                raise ValueError("Unknown transformer variant.")
         elif self.pool == 'cls':
             if self.transformer_variant == 'vanilla':
-                x = x[:, 0]
-                x = self.mlp_head(x)
+                feat = x[:, 0]
             else:
-                raise ValueError("CLS pooling is not supported for swin transformer variant.")
+                raise ValueError("CLS pooling is only supported for vanilla variant.")
         elif self.pool == 'conv':
             if self.transformer_variant == 'vanilla':
-                x = self.patch_pooling(x[:, 1:])[:, 0, :]
+                feat = self.patch_pooling(x[:, 1:])[:, 0, :]
             else:
                 x_seq = rearrange(x, 'b h w d -> b (h w) d')
-                x = self.patch_pooling(x_seq)[:, 0, :]
-            x = self.mlp_head(x)
+                feat = self.patch_pooling(x_seq)[:, 0, :]
         elif self.pool == 'linear':
             if self.transformer_variant == 'vanilla':
-                x = self.patch_pooling(x[:, 1:].transpose(1, 2)).squeeze(-1)
+                feat = self.patch_pooling(x[:, 1:].transpose(1, 2)).squeeze(-1)
             else:
                 x_seq = rearrange(x, 'b h w d -> b (h w) d')
-                x = self.patch_pooling(x_seq.transpose(1, 2)).squeeze(-1)
-            x = self.mlp_head(x)
+                feat = self.patch_pooling(x_seq.transpose(1, 2)).squeeze(-1)
         else:
             raise ValueError("Unsupported pooling type.")
 
-        return x
+        loc_out = self.mlp_head(feat)
+        if self.classify_sound and self.cls_head is not None:
+            cls_out = self.cls_head(feat)
+            return loc_out, cls_out
+        return loc_out
 
 
 

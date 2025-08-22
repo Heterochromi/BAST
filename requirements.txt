@@ -11,3 +11,4 @@ statsmodels==0.12.2
 torch==1.9.0+cu102
 torchsummary==1.5.1
 torchvision==0.10.0+cu102
+mambavision

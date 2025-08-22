@@ -5,6 +5,7 @@ from conf import *
 import argparse
 import torch
 import torch.nn as nn
+import sys
 
 
 parser = argparse.ArgumentParser()
@@ -13,6 +14,8 @@ parser.add_argument("-i", "--integ", help="SUB/ADD/CONCAT")
 parser.add_argument("-l", "--loss", help="MSE/AD/MIX")
 parser.add_argument("-s", "--shareweights", help="Share weights", type=bool, default=False)
 parser.add_argument("-e", "--env", help="RI/RI01/RI02")
+parser.add_argument("--classify", help="Enable binary sound classification head", action='store_true')
+parser.add_argument("--cls_weight", help="Weight for classification loss", type=float, default=1.0)
 args = parser.parse_args()
 
 BINAURAL_INTEGRATION = args.integ
@@ -20,6 +23,8 @@ LOSS = args.loss
 SHARE_PARAMS = args.shareweights
 DATA_ENV = args.env
 MODEL_TYPE = args.backbone
+ENABLE_CLASSIFY = args.classify
+CLS_WEIGHT = args.cls_weight
 
 if 'SNR' in DATA_ENV:
     LR = 0.001
@@ -56,6 +61,8 @@ net = BAST_Variant(
     binaural_integration=BINAURAL_INTEGRATION,
     share_params=SHARE_PARAMS,
     transformer_variant=MODEL_TYPE,
+    classify_sound=ENABLE_CLASSIFY,
+    num_classes_cls=1,
 )
 
 """Parallelize the network"""
@@ -72,6 +79,7 @@ elif LOSS == 'AD':
     criterion = AngularLossWithCartesianCoordinate()
 elif LOSS == 'MIX':
     criterion = MixWithCartesianCoordinate()
+criterion_cls = nn.BCEWithLogitsLoss() if ENABLE_CLASSIFY else None
 conf = {
     'SPECTROGRAM_SIZE': SPECTROGRAM_SIZE,
     'PATCH_SIZE': PATCH_SIZE,
@@ -108,6 +116,8 @@ model_save_name = MODEL_NAME + '_' + BINAURAL_INTEGRATION + '_' + LOSS + '_XY' +
     'SP' if SHARE_PARAMS else 'NSP') + '_' + MODEL_TYPE
 if DATA_ENV != 'RI':
     model_save_name += '_' + DATA_ENV
+if ENABLE_CLASSIFY:
+    model_save_name += '_CLS'
 
 """Starting training"""
 print('[{}] Start training...'.format(datetime.now()))
@@ -121,7 +131,20 @@ for epoch in range(start_epoch, end_epoch):
         input_x = tr_x[idx_s:idx_e, :, :, :].cuda()
         target = tr_y[idx_s:idx_e, :].cuda()
         output = net(input_x)
-        loss = criterion(output, target)
+        if ENABLE_CLASSIFY:
+            loc_out, cls_out = output
+            # Expect classification target to be in last channel if provided; else derive a dummy zero vector
+            if tr_y.shape[1] > 2:
+                target_loc = target[:, :2]
+                target_cls = target[:, 2].unsqueeze(1)
+            else:
+                target_loc = target
+                target_cls = torch.zeros_like(cls_out)
+            loss_loc = criterion(loc_out, target_loc)
+            loss_cls = criterion_cls(cls_out, target_cls)
+            loss = loss_loc + CLS_WEIGHT * loss_cls
+        else:
+            loss = criterion(output, target)
         loss_v = loss.item()
         batch_loss += loss_v * (idx_e - idx_s)
         optimizer.zero_grad()
@@ -148,7 +171,19 @@ for epoch in range(start_epoch, end_epoch):
             input_x = val_x[idx_s:idx_e, :, :, :].cuda()
             target = val_y[idx_s:idx_e, :].cuda()
             output = net(input_x)
-            loss = criterion(output, target)
+            if ENABLE_CLASSIFY:
+                loc_out, cls_out = output
+                if val_y.shape[1] > 2:
+                    target_loc = target[:, :2]
+                    target_cls = target[:, 2].unsqueeze(1)
+                else:
+                    target_loc = target
+                    target_cls = torch.zeros_like(cls_out)
+                loss_loc = criterion(loc_out, target_loc)
+                loss_cls = criterion_cls(cls_out, target_cls)
+                loss = loss_loc + CLS_WEIGHT * loss_cls
+            else:
+                loss = criterion(output, target)
             loss_v = loss.item()
             batch_loss_val += loss_v * (idx_e - idx_s)
             print('\r[{}] [VALIDATION] Epoch: {}, Batch: {}, Curr Loss: {:.6f}, Avg Loss: {:.6f}'.format(datetime.now(),

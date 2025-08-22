@@ -20,6 +20,7 @@ parser.add_argument("-i", "--integ", help="SUB/ADD/CONCAT")
 parser.add_argument("-l", "--loss", help="MSE/AD/MIN")
 parser.add_argument("-s", "--shareweights", help="Share weights", type=bool, default=False)
 parser.add_argument("-e", "--env", help="RI/RI01/RI02")
+parser.add_argument("--classify", help="Enable binary sound classification head", action='store_true')
 args = parser.parse_args()
 
 
@@ -27,10 +28,13 @@ args = parser.parse_args()
 BINAURAL_INTEGRATION = args.integ
 LOSS = args.loss  # MSE AD MIX
 SHARE_PARAMS = args.shareweights  # True False
+ENABLE_CLASSIFY = args.classify
 MODEL_DATA_ENV = args.env
 MODEL_NAME = 'BAST'  # BAST AudLocViT
 MODEL_TYPE = args.backbone
-model_name = '{}_{}_{}_XY_{}_{}'.format(MODEL_NAME, BINAURAL_INTEGRATION, LOSS, 'SP' if SHARE_PARAMS else 'NSP', MODEL_TYPE)  # 'BAST_SUB_MIX_XY_NSP'  #args.modelname
+model_name = '{}_{}_{}_XY_{}_{}'.format(MODEL_NAME, BINAURAL_INTEGRATION, LOSS, 'SP' if SHARE_PARAMS else 'NSP', MODEL_TYPE)
+if ENABLE_CLASSIFY:
+    model_name += '_CLS'
 TEST_DATA_ENV = args.env
 # model_name = 'BAST_SUB_MIX_XY_NSP'  # SUB ADD CONCAT   MSE MIX AD   NSP  AudLocViT
 # DATA_ENV = 'RI'  # RI RI01 RI02 RI_SNR_40
@@ -70,6 +74,8 @@ net = BAST_Variant(
     binaural_integration=conf['BINAURAL_INTEGRATION'],
     share_params=conf['SHARE_PARAMS'],
     transformer_variant=MODEL_TYPE,
+    classify_sound=ENABLE_CLASSIFY,
+    num_classes_cls=1,
 )
 
 
@@ -99,6 +105,8 @@ for batch in range(num_batches_val):
     input_x = te_x[idx_s:idx_e, :, :, :].cuda()
     target = te_y[idx_s:idx_e, :].cuda()
     output = net(input_x)
+    if ENABLE_CLASSIFY:
+        output, _ = output
 
     loss = criterion(output, target)
     te_pred[idx_s:idx_e] = output.detach().cpu().numpy()
