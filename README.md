@@ -48,6 +48,41 @@ For training BAST-Mamba with subtraction integration, hybrid loss and weights-sh
     
     python train_BAST.py --backbone mamba --integ SUB --loss MIX --shareweights True --env RI
 
+### Multitask training (Classification + Localization)
+
+Data format requirements for precomputed spectrograms:
+- Each sample is a stereo log-mel spectrogram tensor of shape `[2, F, T]` saved as `.npy` or `.pt`.
+- The dataset index CSV must contain the following columns:
+  - `input_file`: absolute or relative path to the spectrogram file
+  - `class`: class label (int or string)
+  - `azimuth_deg`: azimuth in degrees (e.g., 0..360 or -180..180)
+  - `elevation_deg`: elevation in degrees (e.g., -90..90)
+
+Example minimal CSV header:
+
+```csv
+input_file,class,azimuth_deg,elevation_deg
+/abs/path/spec_0001.npy,footsteps,36,-10
+```
+
+Run training with your CSV:
+
+```bash
+python train_multitask.py \
+  --csv dataset_index.csv \
+  --backbone vanilla \
+  --integ SUB \
+  --loss MIX \
+  --epochs 20 \
+  --batch 16 \
+  --cls_weight 1.0 \
+  --elev_weight 0.1
+```
+
+Notes:
+- The model outputs: localization vector `[x, y]`, class logits, and a scalar elevation in degrees.
+- The training script uses MIX/AD/MSE for localization, CrossEntropy for multi-class classification, and MSE for elevation.
+
 ### Test
 
 For testing BAST-Mamba in the anechoic environment + lecture hall:

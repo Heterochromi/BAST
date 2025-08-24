@@ -1,1 +1,8 @@
 lazygit.exe
+
+output/
+
+dataset_index.csv
+
+test.csv
+test.pt

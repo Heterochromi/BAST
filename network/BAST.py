@@ -3,9 +3,7 @@ from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 from torch import nn
 import numpy as np
-from timm.models.swin_transformer import SwinTransformerBlock
-# from vision_mamba.model import VisionEncoderMambaBlock
-from mambavision.models.mamba_vision import MambaVisionLayer
+
 
 
 """
@@ -264,7 +262,7 @@ class BAST_Variant(nn.Module):
                  depth,  # transformer depth, e.g., 3
                  heads,  # number of attention heads, e.g., 16
                  mlp_dim,  # MLP dimension, e.g., 1024
-                 pool='mean',  # pooling method: 'mean', 'conv', 'linear'
+                 pool='conv',  # pooling method: 'mean', 'conv', 'linear'
                  channels=2,  # input channels (stereo: left/right)
                  dim_head=64,
                  dropout=0.2,
@@ -273,7 +271,8 @@ class BAST_Variant(nn.Module):
                  share_params=False,
                  transformer_variant='vanilla',  # choose between 'vanilla', 'swin' and 'mamba'
                  classify_sound=False,
-                 num_classes_cls=1
+                 num_classes_cls=1,
+                 regress_elevation=False
                  ):
         super().__init__()
         self.pool = pool
@@ -281,6 +280,7 @@ class BAST_Variant(nn.Module):
         self.share_params = share_params
         self.transformer_variant = transformer_variant
         self.classify_sound = classify_sound
+        self.regress_elevation = regress_elevation
 
         # --- Compute patch grid dimensions and padding ---
         image_height, image_width = image_size
@@ -319,87 +319,7 @@ class BAST_Variant(nn.Module):
                 self.transformer2 = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
             integration_dim = dim if binaural_integration != 'CONCAT' else dim * 2
             self.transformer3 = Transformer(integration_dim, depth, heads, dim_head, mlp_dim, dropout)
-        elif transformer_variant == 'swin':
-            swin_patch_size = 7
-            # --- Swin branch: reshape tokens into grid for Swin blocks ---
-            input_resolution = (self.num_patches_height, self.num_patches_width)
-            self.transformer1 = nn.Sequential(*[
-                SwinTransformerBlock(dim=dim,
-                                     input_resolution=input_resolution,
-                                     num_heads=heads,
-                                     window_size=swin_patch_size,  # you can experiment with this
-                                     shift_size=0,
-                                     mlp_ratio=mlp_dim / dim,
-                                     proj_drop=dropout,
-                                     attn_drop=dropout,
-                                     drop_path=0.0,
-                                     norm_layer=nn.LayerNorm)
-                for _ in range(depth)
-            ])
-            if not share_params:
-                self.transformer2 = nn.Sequential(*[
-                    SwinTransformerBlock(dim=dim,
-                                         input_resolution=input_resolution,
-                                         num_heads=heads,
-                                         window_size=swin_patch_size,
-                                         shift_size=0,
-                                         mlp_ratio=mlp_dim / dim,
-                                         proj_drop=dropout,
-                                         attn_drop=dropout,
-                                         drop_path=0.0,
-                                         norm_layer=nn.LayerNorm)
-                    for _ in range(depth)
-                ])
-            integration_dim = dim if binaural_integration != 'CONCAT' else dim * 2
-            self.transformer3 = nn.Sequential(*[
-                SwinTransformerBlock(dim=integration_dim,
-                                     input_resolution=input_resolution,
-                                     num_heads=heads,
-                                     window_size=swin_patch_size,
-                                     shift_size=0,
-                                     mlp_ratio=mlp_dim / integration_dim,
-                                     proj_drop=dropout,
-                                     attn_drop=dropout,
-                                     drop_path=0.0,
-                                     norm_layer=nn.LayerNorm)
-                for _ in range(depth)
-            ])
-        elif transformer_variant == 'vim':
-            # For fair comparison, we use the patch embedding from BAST and then feed the resulting tokens
-            # to a stack of VisionEncoderMambaBlock blocks.
-            # Note: Here we fix dt_rank to 32, use mlp_dim as dim_inner, and set d_state equal to dim.
-            self.transformer1 = nn.Sequential(*[
-                VisionEncoderMambaBlock(dim=dim, dt_rank=16, dim_inner=mlp_dim, d_state=int(dim/4))
-                for _ in range(depth)
-            ])
-            if not share_params:
-                self.transformer2 = nn.Sequential(*[
-                    VisionEncoderMambaBlock(dim=dim, dt_rank=16, dim_inner=mlp_dim, d_state=int(dim/4))
-                    for _ in range(depth)
-                ])
-            integration_dim = dim if binaural_integration != 'CONCAT' else dim * 2
-            self.transformer3 = nn.Sequential(*[
-                VisionEncoderMambaBlock(dim=integration_dim, dt_rank=16, dim_inner=mlp_dim, d_state=int(dim/4))
-                for _ in range(depth)
-            ])
-        elif transformer_variant == 'mamba':
-            # Here, we directly use a MambaVisionLayer (or a stack of them)
-            # Note: MambaVisionLayer expects a 2D feature map, so we will reshape the tokens accordingly.
-            # We set conv=False and downsample=False to keep the spatial resolution.
-            self.transformer1 = MambaVisionLayer(dim=dim, depth=3, num_heads=heads, window_size=8, conv=False,
-                                                 downsample=False, mlp_ratio=int(mlp_dim/dim))
-
-            if not share_params:
-                self.transformer2 = MambaVisionLayer(dim=dim, depth=3, num_heads=heads, window_size=8, conv=False,
-                                                     downsample=False, mlp_ratio=int(mlp_dim/dim))
-
-            integration_dim = dim if binaural_integration != 'CONCAT' else dim * 2
-            self.transformer3 = MambaVisionLayer(dim=integration_dim, depth=3, num_heads=heads, window_size=8,
-                                                 conv=False, downsample=False, mlp_ratio=int(mlp_dim/dim))
-
-        else:
-            raise ValueError("Unknown transformer_variant. Choose 'vanilla' 'swin' or 'mamba'.")
-
+        
         # --- Optional Pooling ---
         if pool == 'conv':
             self.patch_pooling = nn.Sequential(
@@ -428,6 +348,15 @@ class BAST_Variant(nn.Module):
             )
         else:
             self.cls_head = None
+
+        # Optional elevation regression head
+        if self.regress_elevation:
+            self.elev_head = nn.Sequential(
+                nn.LayerNorm(integration_dim),
+                nn.Linear(integration_dim, 1),
+            )
+        else:
+            self.elev_head = None
 
     def process_branch(self, img_branch, transformer_module):
         # Shared patch embedding: output shape [B, N, dim]
@@ -508,10 +437,14 @@ class BAST_Variant(nn.Module):
             raise ValueError("Unsupported pooling type.")
 
         loc_out = self.mlp_head(feat)
+        outputs = [loc_out]
         if self.classify_sound and self.cls_head is not None:
-            cls_out = self.cls_head(feat)
-            return loc_out, cls_out
-        return loc_out
+            outputs.append(self.cls_head(feat))
+        if self.regress_elevation and self.elev_head is not None:
+            outputs.append(self.elev_head(feat))
+        if len(outputs) == 1:
+            return outputs[0]
+        return tuple(outputs)
 
 
 
@@ -585,7 +518,7 @@ if __name__ == '__main__':
         emb_dropout=EMB_DROPOUT,
         binaural_integration=BINAURAL_INTEGRATION,
         share_params=SHARE_PARAMS,
-        transformer_variant='mamba',
+        transformer_variant='vanilla',
     )
     net.cuda()
     from torchsummary import summary
