@@ -1,8 +1,13 @@
 lazygit.exe
 
 output/
-
+output_tensors/
 dataset_index.csv
-
+__pycache__/
 test.csv
 test.pt
+
+random_sample.csv
+
+
+tensor_metadata.csv

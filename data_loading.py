@@ -85,12 +85,12 @@ class SpectrogramDataset(Dataset):
         if tensor.ndim != 3 or tensor.shape[0] != 2:
             raise ValueError(f"Expected spectrogram shape [2, F, T], got {tuple(tensor.shape)} for {path}")
         tensor = tensor.float()
-        if self.normalize:
-            # Per-sample, per-channel standardization across all bins/time
-            mean = tensor.view(2, -1).mean(dim=1).view(2, 1, 1)
-            std = tensor.view(2, -1).std(dim=1).view(2, 1, 1)
-            std = torch.clamp(std, min=1e-6)
-            tensor = (tensor - mean) * (1.0 / std)
+        # if self.normalize:
+        #     # Per-sample, per-channel standardization across all bins/time
+        #     mean = tensor.view(2, -1).mean(dim=1).view(2, 1, 1)
+        #     std = tensor.view(2, -1).std(dim=1).view(2, 1, 1)
+        #     std = torch.clamp(std, min=1e-6)
+        #     tensor = (tensor - mean) * (1.0 / std)
         return tensor
 
     @staticmethod
@@ -135,5 +135,6 @@ def create_splits(csv_path: str,
 
 
 if __name__ == "__main__":
-    dataset = SpectrogramDataset("test.csv")
+    dataset = SpectrogramDataset("tensor_metadata.csv")
     print(dataset[0])
+    print(f"Number of classes: {len(dataset.class_to_index)}")
