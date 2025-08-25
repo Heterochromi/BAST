@@ -272,7 +272,6 @@ class BAST_Variant(nn.Module):
                  transformer_variant='vanilla',  # choose between 'vanilla', 'swin' and 'mamba'
                  classify_sound=False,
                  num_classes_cls=1,
-                 regress_elevation=False
                  ):
         super().__init__()
         self.pool = pool
@@ -280,7 +279,6 @@ class BAST_Variant(nn.Module):
         self.share_params = share_params
         self.transformer_variant = transformer_variant
         self.classify_sound = classify_sound
-        self.regress_elevation = regress_elevation
 
         # --- Compute patch grid dimensions and padding ---
         image_height, image_width = image_size
@@ -349,14 +347,6 @@ class BAST_Variant(nn.Module):
         else:
             self.cls_head = None
 
-        # Optional elevation regression head
-        if self.regress_elevation:
-            self.elev_head = nn.Sequential(
-                nn.LayerNorm(integration_dim),
-                nn.Linear(integration_dim, 1),
-            )
-        else:
-            self.elev_head = None
 
     def process_branch(self, img_branch, transformer_module):
         # Shared patch embedding: output shape [B, N, dim]
@@ -440,8 +430,6 @@ class BAST_Variant(nn.Module):
         outputs = [loc_out]
         if self.classify_sound and self.cls_head is not None:
             outputs.append(self.cls_head(feat))
-        if self.regress_elevation and self.elev_head is not None:
-            outputs.append(self.elev_head(feat))
         if len(outputs) == 1:
             return outputs[0]
         return tuple(outputs)
