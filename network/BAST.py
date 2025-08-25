@@ -456,16 +456,52 @@ class AngularLossWithPolarCoordinate(nn.Module):
 
 
 class MSELossWithPolarCoordinate(nn.Module):
-    def __init__(self):
+    def __init__(self, w_x: float = 1.0, w_y: float = 1.0, reduction: str = 'mean'):
         super(MSELossWithPolarCoordinate, self).__init__()
-        self.mse = nn.MSELoss()
+        self.w_x = w_x
+        self.w_y = w_y
+        self.mse = nn.MSELoss(reduction=reduction)
 
     def forward(self, x, y):
-        x_coord_x = (x[:, 0] * torch.cos(x[:, 1])).unsqueeze(1)
-        x_coord_y = (x[:, 0] * torch.sin(x[:, 1])).unsqueeze(1)
-        x_coord = torch.cat((x_coord_x, x_coord_y), dim=1)
-        loss = self.mse(x_coord, y)
+        # x: [B, 2] where x[:,0] = radius (r), x[:,1] = angle (theta in radians)
+        # y: [B, 2] target Cartesian coordinates [x, y]
+        pred_x = (x[:, 0] * torch.cos(x[:, 1])).unsqueeze(1)
+        pred_y = (x[:, 0] * torch.sin(x[:, 1])).unsqueeze(1)
+        target_x = y[:, 0:1]
+        target_y = y[:, 1:2]
+        loss_x = self.mse(pred_x, target_x)
+        loss_y = self.mse(pred_y, target_y)
+        return self.w_x * loss_x + self.w_y * loss_y
 
+
+class AzElLossDegrees(nn.Module):
+    def __init__(self, az_weight: float = 1.0, el_weight: float = 1.0, reduction: str = 'mean'):
+        super(AzElLossDegrees, self).__init__()
+        self.az_weight = az_weight
+        self.el_weight = el_weight
+        self.reduction = reduction
+
+    def forward(self, pred, target):
+        # pred/target shape: [..., 2] = [azimuth_deg, elevation_deg]
+        pred_az_deg = pred[..., 0]
+        pred_el_deg = pred[..., 1]
+        tgt_az_deg = target[..., 0]
+        tgt_el_deg = target[..., 1]
+
+        # Circular azimuth error (radians), robust to wrap-around
+        delta_rad = (pred_az_deg - tgt_az_deg) * (torch.pi / 180.0)
+        az_err_rad = torch.atan2(torch.sin(delta_rad), torch.cos(delta_rad))
+        loss_az = az_err_rad * az_err_rad
+
+        # Elevation MSE in degrees
+        el_diff = pred_el_deg - tgt_el_deg
+        loss_el = el_diff * el_diff
+
+        loss = self.az_weight * loss_az + self.el_weight * loss_el
+        if self.reduction == 'mean':
+            return loss.mean()
+        if self.reduction == 'sum':
+            return loss.sum()
         return loss
 
 

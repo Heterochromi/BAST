@@ -94,15 +94,9 @@ class SpectrogramDataset(Dataset):
         return tensor
 
     @staticmethod
-    def _deg_to_unit_vec(az_deg: float, el_deg: float) -> torch.Tensor:
-        # Convert spherical (az, el) in degrees to 2D Cartesian x,y used by repo
-        # Original model uses only azimuth via cos/sin, ignoring elevation. For multitask
-        # we keep regression targets as raw degrees alongside classification label.
-        # We still return a unit vector for localization criterion if needed.
-        az_rad = math.radians(az_deg % 360.0)
-        x = math.cos(az_rad)
-        y = math.sin(az_rad)
-        return torch.tensor([x, y], dtype=torch.float32)
+    def _get_az_el_deg(az_deg: float, el_deg: float) -> torch.Tensor:
+        # Return native azimuth and elevation in degrees
+        return torch.tensor([az_deg, el_deg], dtype=torch.float32)
 
     def __getitem__(self, idx: int):
         row = self.df.iloc[idx]
@@ -113,13 +107,13 @@ class SpectrogramDataset(Dataset):
         az = float(row['azimuth_deg'])
         el = float(row['elevation_deg'])
         # Multi-task targets:
-        # - localization: 2D unit vector 
+        # - localization: [azimuth_deg, elevation_deg]
         # - classification: integer class
-        # - raw az/el: regression in degrees
-        loc_target_xy = self._deg_to_unit_vec(az, el)  # [2]
+        # - raw az/el (duplicate for convenience): regression in degrees
+        loc_target = self._get_az_el_deg(az, el)  # [2]
         cls_target = torch.tensor([class_idx], dtype=torch.long)
         az_el_deg = torch.tensor([az, el], dtype=torch.float32)
-        return spec, loc_target_xy, cls_target, az_el_deg
+        return spec, loc_target, cls_target, az_el_deg
 
 
 def create_splits(csv_path: str,
