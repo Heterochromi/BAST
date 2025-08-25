@@ -257,7 +257,7 @@ class BAST_Variant(nn.Module):
                  image_size,  # e.g., (129, 61)
                  patch_size,  # e.g., 16
                  patch_overlap,  # e.g., 10
-                 num_classes,  # e.g., 2
+                 num_coordinates_output,  # e.g., 2
                  dim,  # embedding dimension, e.g., 1024 or lower
                  depth,  # transformer depth, e.g., 3
                  heads,  # number of attention heads, e.g., 16
@@ -269,7 +269,8 @@ class BAST_Variant(nn.Module):
                  emb_dropout=0.,
                  binaural_integration='SUB',  # 'SUB', 'ADD', or 'CONCAT'
                  share_params=False,
-                 transformer_variant='vanilla',  # choose between 'vanilla', 'swin' and 'mamba'
+                 transformer_variant='vanilla',
+                 max_sources = 4,
                  classify_sound=False,
                  num_classes_cls=1,
                  ):
@@ -279,6 +280,10 @@ class BAST_Variant(nn.Module):
         self.share_params = share_params
         self.transformer_variant = transformer_variant
         self.classify_sound = classify_sound
+        self.max_sources = max_sources
+        self.num_coordinates_output = num_coordinates_output
+        self.num_classes_cls = num_classes_cls
+
 
         # --- Compute patch grid dimensions and padding ---
         image_height, image_width = image_size
@@ -317,6 +322,8 @@ class BAST_Variant(nn.Module):
                 self.transformer2 = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
             integration_dim = dim if binaural_integration != 'CONCAT' else dim * 2
             self.transformer3 = Transformer(integration_dim, depth, heads, dim_head, mlp_dim, dropout)
+            # Detection head (per-source slots): [loc (num_coordinates_output), objectness (1), classes (num_classes_cls)]
+        
         
         # --- Optional Pooling ---
         if pool == 'conv':
@@ -332,20 +339,11 @@ class BAST_Variant(nn.Module):
                 nn.GELU()
             )
 
-        # --- Final Classification Head ---
-        self.mlp_head = nn.Sequential(
-            nn.LayerNorm(integration_dim),
-            nn.Linear(integration_dim, num_classes),
-        )
 
-        # Optional sound classification head
-        if self.classify_sound:
-            self.cls_head = nn.Sequential(
+        self.det_head = nn.Sequential(
                 nn.LayerNorm(integration_dim),
-                nn.Linear(integration_dim, num_classes_cls),
+                nn.Linear(integration_dim, self.max_sources * (self.num_coordinates_output + 1 + self.num_classes_cls))
             )
-        else:
-            self.cls_head = None
 
 
     def process_branch(self, img_branch, transformer_module):
@@ -357,19 +355,8 @@ class BAST_Variant(nn.Module):
             x = torch.cat((cls_tokens, x), dim=1)
             x = x + self.pos_embedding[:, :x.shape[1]]
             x = self.dropout(x)
-        elif self.transformer_variant == 'swin':
-            x = rearrange(x, 'b (h w) d -> b h w d', h=self.num_patches_height, w=self.num_patches_width)
-        elif self.transformer_variant == 'mamba':
-            # Reshape sequence tokens to 2D feature map: [B, N, dim] -> [B, dim, H, W]
-            x = rearrange(x, 'b (h w) d -> b d h w', h=self.num_patches_height, w=self.num_patches_width)
-        else:
-            raise ValueError("Unknown transformer variant in process_branch.")
-
         # Apply the corresponding transformer module
         x = transformer_module(x)
-        # For mamba, if the module returns a 2D map, flatten back to sequence
-        # if self.transformer_variant == 'mamba':
-        #     x = rearrange(x, 'b d h w -> b (h w) d')
         return x
 
     def forward(self, img):
@@ -386,10 +373,8 @@ class BAST_Variant(nn.Module):
             x = x_l + x_r
         elif self.binaural_integration == 'SUB':
             x = x_l - x_r
-        elif self.binaural_integration == 'CONCAT' and self.transformer_variant != 'mamba':
+        elif self.binaural_integration == 'CONCAT':
             x = torch.cat((x_l, x_r), dim=-1)
-        elif self.binaural_integration == 'CONCAT' and self.transformer_variant == 'mamba':
-            x = torch.cat((x_l, x_r), dim=1)
         else:
             raise ValueError("Unsupported binaural_integration option.")
 
@@ -400,10 +385,6 @@ class BAST_Variant(nn.Module):
         if self.pool == 'mean':
             if self.transformer_variant == 'vanilla':
                 feat = x.mean(dim=1)
-            elif self.transformer_variant == 'swin':
-                feat = x.mean(dim=(1, 2))
-            elif self.transformer_variant == 'mamba':
-                feat = x.mean(dim=(2, 3))
             else:
                 raise ValueError("Unknown transformer variant.")
         elif self.pool == 'cls':
@@ -425,14 +406,14 @@ class BAST_Variant(nn.Module):
                 feat = self.patch_pooling(x_seq.transpose(1, 2)).squeeze(-1)
         else:
             raise ValueError("Unsupported pooling type.")
-
-        loc_out = self.mlp_head(feat)
-        outputs = [loc_out]
-        if self.classify_sound and self.cls_head is not None:
-            outputs.append(self.cls_head(feat))
-        if len(outputs) == 1:
-            return outputs[0]
-        return tuple(outputs)
+        # --- Detection outputs ---
+        B = feat.size(0)
+        feat_n = self.det_head(feat)
+        det = feat_n.view(B, self.max_sources, self.num_coordinates_output + 1 + self.num_classes_cls)
+        loc_out   = det[..., :self.num_coordinates_output]
+        obj_logit = det[..., self.num_coordinates_output]
+        cls_logit = det[..., self.num_coordinates_output + 1:]
+        return loc_out, obj_logit, cls_logit
 
 
 
@@ -494,7 +475,7 @@ if __name__ == '__main__':
         image_size=SPECTROGRAM_SIZE,
         patch_size=PATCH_SIZE,
         patch_overlap=PATCH_OVERLAP,
-        num_classes=NUM_OUTPUT,
+        num_coordinates_output=NUM_OUTPUT,
         dim=EMBEDDING_DIM,
         depth=TRANSFORMER_DEPTH,
         heads=TRANSFORMER_HEADS,
