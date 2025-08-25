@@ -489,20 +489,14 @@ class AzElLossDegrees(nn.Module):
         tgt_el_deg = target[..., 1]
 
         # Circular azimuth error (radians), robust to wrap-around
-        delta_rad = (pred_az_deg - tgt_az_deg) * (torch.pi / 180.0)
-        az_err_rad = torch.atan2(torch.sin(delta_rad), torch.cos(delta_rad))
-        loss_az = az_err_rad * az_err_rad
+        delta_az_rad = (pred_az_deg - tgt_az_deg) * (torch.pi/180)
+        az_err = torch.atan2(torch.sin(delta_az_rad), torch.cos(delta_az_rad))
+        loss_az = az_err**2
 
         # Elevation MSE in degrees
-        el_diff = pred_el_deg - tgt_el_deg
-        loss_el = el_diff * el_diff
-
-        loss = self.az_weight * loss_az + self.el_weight * loss_el
-        if self.reduction == 'mean':
-            return loss.mean()
-        if self.reduction == 'sum':
-            return loss.sum()
-        return loss
+        delta_el_rad = (pred_el_deg - tgt_el_deg) * (torch.pi/180)
+        loss_el = delta_el_rad**2
+        return self.az_weight * loss_az.mean() + self.el_weight * loss_el.mean()
 
 
 if __name__ == '__main__':
