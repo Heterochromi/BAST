@@ -321,6 +321,10 @@ class AzElLossDegrees(nn.Module):
         self.az_weight = az_weight
         self.el_weight = el_weight
         self.reduction = reduction
+    def _convert_to_radians(self, x):
+        return x * (torch.pi/180)
+    def _convert_to_degrees(self, x):
+        return x * (180/torch.pi)
 
     def forward(self, pred, target):
         # pred/target shape: [..., 2] = [azimuth_deg, elevation_deg]
@@ -330,12 +334,14 @@ class AzElLossDegrees(nn.Module):
         tgt_el_deg = target[..., 1]
 
         # Circular azimuth error (radians), robust to wrap-around
-        delta_az_rad = (pred_az_deg - tgt_az_deg) * (torch.pi/180)
+        delta_az_rad = self._convert_to_radians(pred_az_deg - tgt_az_deg)
         az_err = torch.atan2(torch.sin(delta_az_rad), torch.cos(delta_az_rad))
+        az_err = self._convert_to_degrees(az_err)
         loss_az = az_err**2
 
         # Elevation MSE in degrees
-        delta_el_rad = (pred_el_deg - tgt_el_deg) * (torch.pi/180)
+        delta_el_rad = self._convert_to_radians(pred_el_deg - tgt_el_deg)
+        delta_el_rad = self._convert_to_degrees(delta_el_rad)
         loss_el = delta_el_rad**2
         return self.az_weight * loss_az.mean() + self.el_weight * loss_el.mean()
 
