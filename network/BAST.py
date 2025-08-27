@@ -336,37 +336,42 @@ class AzElLossDegrees(nn.Module):
         # Circular azimuth error (radians), robust to wrap-around
         delta_az_rad = self._convert_to_radians(pred_az_deg - tgt_az_deg)
         az_err = torch.atan2(torch.sin(delta_az_rad), torch.cos(delta_az_rad))
-        az_err = self._convert_to_degrees(az_err)
+        # az_err = self._convert_to_degrees(az_err)
         loss_az = az_err**2
 
         # Elevation MSE in degrees
-        delta_el_rad = self._convert_to_radians(pred_el_deg - tgt_el_deg)
-        delta_el_rad = self._convert_to_degrees(delta_el_rad)
-        loss_el = delta_el_rad**2
+       
+        delta_el_deg = self._convert_to_radians(pred_el_deg - tgt_el_deg)
+        loss_el = delta_el_deg**2
         return self.az_weight * loss_az.mean() + self.el_weight * loss_el.mean()
 
+# class AzElLossDegrees(nn.Module):
+#     def __init__(self, az_weight: float = 1.0, el_weight: float = 1.0, reduction: str = 'mean'):
+#         super(AzElLossDegrees, self).__init__()
+#         self.az_weight = az_weight
+#         self.el_weight = el_weight
+#         self.reduction = reduction
+#     def _convert_to_radians(self, x):
+#         return x * (torch.pi/180)
+#     def _convert_to_degrees(self, x):
+#         return x * (180/torch.pi)
 
-if __name__ == '__main__':
-    from conf import *
-    net = BAST_Variant(
-        image_size=SPECTROGRAM_SIZE,
-        patch_size=PATCH_SIZE,
-        patch_overlap=PATCH_OVERLAP,
-        num_coordinates_output=NUM_OUTPUT,
-        dim=EMBEDDING_DIM,
-        depth=TRANSFORMER_DEPTH,
-        heads=TRANSFORMER_HEADS,
-        mlp_dim=TRANSFORMER_MLP_DIM,
-        pool=TRANSFORMER_POOL,
-        channels=INPUT_CHANNEL,
-        dim_head=TRANSFORMER_DIM_HEAD,
-        dropout=DROPOUT,
-        emb_dropout=EMB_DROPOUT,
-        binaural_integration=BINAURAL_INTEGRATION,
-        share_params=SHARE_PARAMS,
-        transformer_variant='vanilla',
-    )
-    net.cuda()
-    from torchsummary import summary
-    summary(net, input_size=(2, 129, 61), batch_size=-1)
+#     def forward(self, pred, target):
+#         # pred/target shape: [..., 2] = [azimuth_deg, elevation_deg]
+#         pred_az_deg = pred[..., 0]
+#         pred_el_deg = pred[..., 1]
+#         tgt_az_deg = target[..., 0]
+#         tgt_el_deg = target[..., 1]
+
+#         # Circular azimuth error (radians), robust to wrap-around
+#         delta_az_rad = self._convert_to_radians(pred_az_deg - tgt_az_deg)
+#         az_err = torch.atan2(torch.sin(delta_az_rad), torch.cos(delta_az_rad))
+#         az_err = self._convert_to_degrees(az_err)
+#         loss_az = az_err**2
+
+#         # Elevation MSE in degrees
+       
+#         delta_el_deg = pred_el_deg - tgt_el_deg
+#         loss_el = delta_el_deg**2
+#         return self.az_weight * loss_az.mean() + self.el_weight * loss_el.mean()
 
