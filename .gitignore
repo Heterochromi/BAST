@@ -1,5 +1,5 @@
 lazygit.exe
-
+.venv/
 output/
 output_tensors/
 dataset_index.csv
