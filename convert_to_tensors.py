@@ -2,51 +2,72 @@ from mel_spec_tensor import generate_mel_spectrogram_torch_tensor
 import pandas as pd
 import os
 
-## column shape: created_at,input_file,output_file,subject_id,ir_type,speaker_layout,sample_rate,level,reverb,azimuth_deg,elevation_deg
+def convert_directory_to_tensors(csv_path="dataset/dataset_metadata.csv", dataset_dir="dataset", output_dir="output_tensors", output_csv_path="tensor_metadata.csv"):
+    """
+    Convert audio files from dataset directory to tensors and create metadata CSV.
 
+    Args:
+        csv_path: Path to the dataset metadata CSV file
+        dataset_dir: Directory containing the .wav files
+        output_dir: Directory to save the generated tensor files
+        output_csv_path: Path for the output CSV file
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
 
-
-##output column shape: input_file,azimuth_deg,elevation_deg,class
-
-
-
-
-def convert_directory_to_tensors(csv_path, output_dir, output_csv_path="tensor_metadata.csv"):
     # Read input CSV
-    csv = pd.read_csv(csv_path)
+    csv_data = pd.read_csv(csv_path)
 
     # Prepare output data list
     output_data = []
 
-    for index, row in csv.iterrows():
-        # Extract class from input_file path (e.g., "footsteps", "weapons", "grenade")
-        input_file_path = row["input_file"]
-        # Split path and get the category (second part after "sounds/")
-        path_parts = input_file_path.split("/")
-        class_name = path_parts[path_parts.index("sounds") + 1] if "sounds" in path_parts else "unknown"
-        # Generate tensor
-        output_file_name = row["output_file"].split("/")[-1].replace(".wav", ".pt")
-        output_location = os.path.join(output_dir, output_file_name)
-        generate_mel_spectrogram_torch_tensor(row["output_file"], output_location)
+    for index, row in csv_data.iterrows():
+        # Get the input wav file path
+        wav_filename = row["name_file"]
+        input_wav_path = os.path.join(dataset_dir, wav_filename)
 
-        # Add to output data
-        output_data.append({
-            'input_file': output_location,
-            'azimuth_deg': row["azimuth_deg"],
-            'elevation_deg': row["elevation_deg"],
-            'class': class_name
-        })
+        # Check if the wav file exists
+        if not os.path.exists(input_wav_path):
+            print(f"Warning: File {input_wav_path} not found, skipping...")
+            continue
 
-        # Print progress
-        if (index + 1) % 100 == 0:
-            print(f"Processed {index + 1}/{len(csv)} files")
+        # Generate output tensor filename
+        tensor_filename = wav_filename.replace(".wav", ".pt")
+        output_tensor_path = os.path.join(output_dir, tensor_filename)
+
+        try:
+            # Generate tensor from wav file
+            generate_mel_spectrogram_torch_tensor(input_wav_path, output_tensor_path)
+
+            # Add to output data with same format as input but updated file path
+            output_data.append({
+                'name_file': tensor_filename,  # Now points to .pt file
+                'classes': row["classes"],
+                'azimuth': row["azimuth"],
+                'elevation': row["elevation"],
+                'num_classes': row["num_classes"]
+            })
+
+            # Print progress
+            if (index + 1) % 100 == 0:
+                print(f"Processed {index + 1}/{len(csv_data)} files")
+
+        except Exception as e:
+            print(f"Error processing {input_wav_path}: {str(e)}")
+            continue
 
     # Create output CSV
     output_df = pd.DataFrame(output_data)
     output_df.to_csv(output_csv_path, index=False)
     print(f"Output CSV saved to: {output_csv_path}")
     print(f"Total files processed: {len(output_data)}")
-
+    print(f"Tensors saved to: {output_dir}")
 
 if __name__ == "__main__":
-    convert_directory_to_tensors("random_sample.csv", "output_tensors", "tensor_metadata.csv")
+    # Use the existing dataset metadata from the dataset directory
+    convert_directory_to_tensors(
+        csv_path="dataset/dataset_metadata.csv",
+        dataset_dir="dataset",
+        output_dir="output_tensors",
+        output_csv_path="tensor_metadata.csv"
+    )

@@ -164,8 +164,8 @@ class BAST_Variant(nn.Module):
             integration_dim = dim if binaural_integration != 'CONCAT' else dim * 2
             self.transformer3 = Transformer(integration_dim, depth, heads, dim_head, mlp_dim, dropout)
             # Detection head (per-source slots): [loc (num_coordinates_output), objectness (1), classes (num_classes_cls)]
-        
-        
+
+
         # --- Optional Pooling ---
         if pool == 'conv':
             self.patch_pooling = nn.Sequential(
@@ -315,36 +315,6 @@ class MSELossWithPolarCoordinate(nn.Module):
         return self.w_x * loss_x + self.w_y * loss_y
 
 
-class AzElLossDegrees(nn.Module):
-    def __init__(self, az_weight: float = 1.0, el_weight: float = 1.0, reduction: str = 'mean'):
-        super(AzElLossDegrees, self).__init__()
-        self.az_weight = az_weight
-        self.el_weight = el_weight
-        self.reduction = reduction
-    def _convert_to_radians(self, x):
-        return x * (torch.pi/180)
-    def _convert_to_degrees(self, x):
-        return x * (180/torch.pi)
-
-    def forward(self, pred, target):
-        # pred/target shape: [..., 2] = [azimuth_deg, elevation_deg]
-        pred_az_deg = pred[..., 0]
-        pred_el_deg = pred[..., 1]
-        tgt_az_deg = target[..., 0]
-        tgt_el_deg = target[..., 1]
-
-        # Circular azimuth error (radians), robust to wrap-around
-        delta_az_rad = self._convert_to_radians(pred_az_deg - tgt_az_deg)
-        az_err = torch.atan2(torch.sin(delta_az_rad), torch.cos(delta_az_rad))
-        # az_err = self._convert_to_degrees(az_err)
-        loss_az = az_err**2
-
-        # Elevation MSE in degrees
-       
-        delta_el_deg = self._convert_to_radians(pred_el_deg - tgt_el_deg)
-        loss_el = delta_el_deg**2
-        return self.az_weight * loss_az.mean() + self.el_weight * loss_el.mean()
-
 # class AzElLossDegrees(nn.Module):
 #     def __init__(self, az_weight: float = 1.0, el_weight: float = 1.0, reduction: str = 'mean'):
 #         super(AzElLossDegrees, self).__init__()
@@ -366,12 +336,45 @@ class AzElLossDegrees(nn.Module):
 #         # Circular azimuth error (radians), robust to wrap-around
 #         delta_az_rad = self._convert_to_radians(pred_az_deg - tgt_az_deg)
 #         az_err = torch.atan2(torch.sin(delta_az_rad), torch.cos(delta_az_rad))
-#         az_err = self._convert_to_degrees(az_err)
+#         # az_err = self._convert_to_degrees(az_err)
 #         loss_az = az_err**2
 
 #         # Elevation MSE in degrees
-       
-#         delta_el_deg = pred_el_deg - tgt_el_deg
+
+#         delta_el_deg = self._convert_to_radians(pred_el_deg - tgt_el_deg)
 #         loss_el = delta_el_deg**2
 #         return self.az_weight * loss_az.mean() + self.el_weight * loss_el.mean()
 
+class AzElLossDegrees(nn.Module):
+    def __init__(self, az_weight: float = 1.0, el_weight: float = 1.0, reduction: str = 'mean'):
+        super().__init__()
+        if reduction not in ('mean', 'sum', 'none'):
+            raise ValueError("reduction must be 'mean', 'sum', or 'none'")
+        self.az_weight = az_weight
+        self.el_weight = el_weight
+        self.reduction = reduction
+
+    def forward(self, pred, target):
+        # pred/target: [..., 2] -> [azimuth_deg, elevation_deg]
+        pred_az, pred_el = pred[..., 0], pred[..., 1]
+        tgt_az, tgt_el = target[..., 0], target[..., 1]
+
+        # --- Azimuth: circular, in degrees ---
+        delta_az_rad = (pred_az - tgt_az) * (torch.pi / 180)
+        az_err_rad = torch.atan2(torch.sin(delta_az_rad), torch.cos(delta_az_rad))
+        az_err_deg = az_err_rad * (180 / torch.pi)
+        loss_az = (az_err_deg) ** 2
+
+        # --- Elevation: linear, in degrees ---
+        loss_el = (pred_el - tgt_el) ** 2
+
+        # Combine
+        loss = self.az_weight * loss_az + self.el_weight * loss_el
+
+        # Apply reduction
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:  # 'none'
+            return loss
