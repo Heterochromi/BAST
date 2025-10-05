@@ -2,7 +2,13 @@ from mel_spec_tensor import generate_mel_spectrogram_torch_tensor
 import pandas as pd
 import os
 
-def convert_directory_to_tensors(csv_path="dataset/dataset_metadata.csv", dataset_dir="dataset", output_dir="output_tensors", output_csv_path="tensor_metadata.csv"):
+
+def convert_directory_to_tensors(
+    csv_path="dataset/dataset_metadata.csv",
+    dataset_dir="dataset",
+    output_dir="output_tensors",
+    output_csv_path="tensor_metadata.csv",
+):
     """
     Convert audio files from dataset directory to tensors and create metadata CSV.
 
@@ -40,13 +46,15 @@ def convert_directory_to_tensors(csv_path="dataset/dataset_metadata.csv", datase
             generate_mel_spectrogram_torch_tensor(input_wav_path, output_tensor_path)
 
             # Add to output data with same format as input but updated file path
-            output_data.append({
-                'name_file': tensor_filename,  # Now points to .pt file
-                'classes': row["classes"],
-                'azimuth': row["azimuth"],
-                'elevation': row["elevation"],
-                'num_classes': row["num_classes"]
-            })
+            output_data.append(
+                {
+                    "name_file": tensor_filename,  # Now points to .pt file
+                    "classes": row["classes"],
+                    "azimuth": row["azimuth"],
+                    "elevation": row["elevation"],
+                    "num_classes": row["num_classes"],
+                }
+            )
 
             # Print progress
             if (index + 1) % 100 == 0:
@@ -63,11 +71,12 @@ def convert_directory_to_tensors(csv_path="dataset/dataset_metadata.csv", datase
     print(f"Total files processed: {len(output_data)}")
     print(f"Tensors saved to: {output_dir}")
 
+
 if __name__ == "__main__":
     # Use the existing dataset metadata from the dataset directory
     convert_directory_to_tensors(
-        csv_path="dataset/dataset_metadata.csv",
-        dataset_dir="dataset",
-        output_dir="output_tensors",
-        output_csv_path="tensor_metadata.csv"
+        csv_path="dataset_parallel_100ms/dataset_metadata.csv",
+        dataset_dir="dataset_parallel_100ms",
+        output_dir="output_tensors_100ms",
+        output_csv_path="tensor_metadata_100ms.csv",
     )
