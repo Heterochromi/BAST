@@ -108,7 +108,7 @@ class BAST_Variant(nn.Module):
         image_size,  # e.g., (129, 61) - (freq, time)
         patch_size,  # e.g., 16
         patch_overlap,  # e.g., 10
-        num_coordinates_output,  # e.g., 2 (azimuth, elevation)
+        num_coordinates_output,  # e.g., 2 (azimuth, elevation) or 3 (x,y,z)
         dim,  # embedding dimension, e.g., 512
         depth,  # transformer depth, e.g., 6
         heads,  # number of attention heads, e.g., 8
@@ -165,8 +165,7 @@ class BAST_Variant(nn.Module):
         self.num_patches_width = num_patches_width
         self.num_patches = num_patches_height * num_patches_width
 
-        # FIX #1: Use 2 channels per patch (stereo together)
-        patch_dim = 2 * patch_height * patch_width  # Both channels in each patch
+        patch_dim = 1 * patch_height * patch_width 
 
         # --- Patch Embedding for STEREO input ---
         self.to_patch_embedding = nn.Sequential(
@@ -177,7 +176,7 @@ class BAST_Variant(nn.Module):
             ),
             Rearrange(
                 "b (c k1 k2) n -> b n (k1 k2 c)",
-                c=2,  # stereo
+                c=1,  # stereo
                 k1=patch_height,
                 k2=patch_width,
                 n=self.num_patches,
@@ -200,11 +199,10 @@ class BAST_Variant(nn.Module):
         )
 
         # Optional: Cross-channel attention for better binaural integration
-        if binaural_integration == "CROSS_ATTN":
-            self.cross_attn = nn.MultiheadAttention(
+        self.cross_attn = nn.MultiheadAttention(
                 dim, heads, dropout=dropout, batch_first=True
             )
-            self.norm_cross = nn.LayerNorm(dim)
+        self.norm_cross = nn.LayerNorm(dim)
 
         # FIX #4: Deep transformer after integration
         self.deep_transformer = Transformer(
@@ -250,25 +248,34 @@ class BAST_Variant(nn.Module):
         # Input: [B, 2, H, W] (stereo spectrogram)
         B = img.size(0)
 
-        # FIX #1: Patch embedding with both channels
-        x = self.to_patch_embedding(img)  # [B, N, dim]
-        x = x + self.pos_embedding
-        x = self.dropout(x)
+        img_l = img[:, 0:1, :, :]
+        img_r = img[:, 1:2, :, :]
 
-        # FIX #3: Early light processing before integration
-        x = self.early_transformer(x)  # [B, N, dim]
+        x_l = self.to_patch_embedding(img_l)
+        x_r = self.to_patch_embedding(img_r)
 
-        # FIX #2: Early binaural integration option
-        # (You can also split into L/R here if you want, but keeping together is better)
-        if self.binaural_integration == "CROSS_ATTN":
-            # Cross-attention between left and right channel features
-            # This is a simplified version - you could split patches by channel
-            x_attended, _ = self.cross_attn(x, x, x)
-            x = self.norm_cross(x + x_attended)
+        x_l = x_l + self.pos_embedding
+        x_r = x_r + self.pos_embedding
+
+        x_l = self.dropout(x_l)
+        x_r = self.dropout(x_r)
+
+        x_l = self.early_transformer(x_l)
+        x_r = self.early_transformer(x_r)
+
+        attended_l, _ = self.cross_attn(query=x_l, key=x_r, value=x_r)
+
+        attended_r, _ = self.cross_attn(query=x_r, key=x_l, value=x_l)
+        # Combine the original and the attended features.
+        # This allows the model to retain original features while adding contextual ones(i dont know if this actually works yet).
+        x = x_l + x_r + attended_l + attended_r
+
+        x = self.norm_cross(x)
 
         # Deep processing after integration
         x = self.deep_transformer(x)  # [B, N, dim]
 
+        # --- Decoder section: No changes needed from here onwards ---
         # FIX #5: Use learnable object queries instead of pooling
         queries = repeat(self.object_queries, "n d -> b n d", b=B)
         queries = queries + self.query_pos_embed.unsqueeze(0)

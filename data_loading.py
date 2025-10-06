@@ -135,7 +135,7 @@ class MultiSourceSpectrogramDataset(Dataset):
 
 if __name__ == "__main__":
     dataset = MultiSourceSpectrogramDataset(
-        "tensor_metadata_100ms_XYZ.csv", tensor_dir="output_tensors_100ms"
+        "tensor_metadata_100ms.csv", tensor_dir="output_tensors_100ms"
     )
     print(f"Dataset size: {len(dataset)}")
     print(f"Number of unique classes: {len(dataset.class_to_index)}")

@@ -50,8 +50,9 @@ def convert_directory_to_tensors(
                 {
                     "name_file": tensor_filename,  # Now points to .pt file
                     "classes": row["classes"],
-                    "azimuth": row["azimuth"],
-                    "elevation": row["elevation"],
+                    "x": row["x"],
+                    "y": row["y"],
+                    "z": row["z"],
                     "num_classes": row["num_classes"],
                 }
             )
