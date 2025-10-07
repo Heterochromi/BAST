@@ -100,6 +100,41 @@ class Transformer(nn.Module):
         return x
 
 
+class DecoderLayer(nn.Module):
+    def __init__(self, dim, heads, mlp_dim, dropout):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(
+            dim, heads, dropout=dropout, batch_first=True
+        )
+        self.cross_attn = nn.MultiheadAttention(
+            dim, heads, dropout=dropout, batch_first=True
+        )
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, mlp_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_dim, dim),
+        )
+        self.norm1 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim)
+        self.norm3 = nn.LayerNorm(dim)
+
+    def forward(self, queries, encoder_output):
+        # Self-attention
+        q_self, _ = self.self_attn(queries, queries, queries)
+        queries = self.norm1(queries + q_self)
+
+        # Cross-attention
+        q_cross, _ = self.cross_attn(queries, encoder_output, encoder_output)
+        queries = self.norm2(queries + q_cross)
+
+        # FFN
+        q_ffn = self.ffn(queries)
+        queries = self.norm3(queries + q_ffn)
+
+        return queries
+
+
 # --- Variant-switchable BAST model ---
 class BAST_Variant(nn.Module):
     def __init__(
@@ -110,14 +145,17 @@ class BAST_Variant(nn.Module):
         patch_overlap,  # e.g., 10
         num_coordinates_output,  # e.g., 2 (azimuth, elevation) or 3 (x,y,z)
         dim,  # embedding dimension, e.g., 512
-        depth,  # transformer depth, e.g., 6
+        num_encoder_layers=6,
+        num_decoder_layers=3,
         heads,  # number of attention heads, e.g., 8
         mlp_dim,  # MLP dimension, e.g., 1024
-        channels=2,  # input channels (stereo: left/right)
+        num_encoder_layers=6,
+        num_decoder_layers=3,
+        channels=2,
         dim_head=64,
         dropout=0.2,
         emb_dropout=0.0,
-        binaural_integration="CROSS_ATTN",  # Changed default
+        binaural_integration="CROSS_ATTN",
         max_sources=4,
         num_classes_cls=1,
     ):
@@ -126,6 +164,8 @@ class BAST_Variant(nn.Module):
         self.max_sources = max_sources
         self.num_coordinates_output = num_coordinates_output
         self.num_classes_cls = num_classes_cls
+        self.num_decoder_layers = num_decoder_layers
+        self.num_encoder_layers = num_encoder_layers
 
         # --- Compute patch grid dimensions and padding ---
         image_height, image_width = image_size
@@ -165,9 +205,8 @@ class BAST_Variant(nn.Module):
         self.num_patches_width = num_patches_width
         self.num_patches = num_patches_height * num_patches_width
 
-        patch_dim = 1 * patch_height * patch_width 
+        patch_dim = 1 * patch_height * patch_width
 
-        # --- Patch Embedding for STEREO input ---
         self.to_patch_embedding = nn.Sequential(
             nn.ReflectionPad2d((0, padding_width, padding_height, 0)),
             nn.Unfold(
@@ -176,7 +215,7 @@ class BAST_Variant(nn.Module):
             ),
             Rearrange(
                 "b (c k1 k2) n -> b n (k1 k2 c)",
-                c=1,  # stereo
+                c=1,
                 k1=patch_height,
                 k2=patch_width,
                 n=self.num_patches,
@@ -184,58 +223,44 @@ class BAST_Variant(nn.Module):
             nn.Linear(patch_dim, dim),
         )
 
-        # FIX #2: Add positional embeddings (no CLS token initially)
         self.pos_embedding = nn.Parameter(torch.randn(1, self.num_patches, dim))
         self.dropout = nn.Dropout(emb_dropout)
 
-        # FIX #3: Early binaural processing with fewer layers
-        self.early_transformer = Transformer(
-            dim,
-            depth=2,
-            heads=heads,
-            dim_head=dim_head,
-            mlp_dim=mlp_dim,
-            dropout=dropout,
-        )
+        # self.early_transformer = Transformer(
+        #     dim,
+        #     depth=num_encoder_layers - 2,
+        #     heads=heads,
+        #     dim_head=dim_head,
+        #     mlp_dim=mlp_dim,
+        #     dropout=dropout,
+        # )
 
-        # Optional: Cross-channel attention for better binaural integration
         self.cross_attn = nn.MultiheadAttention(
-                dim, heads, dropout=dropout, batch_first=True
-            )
+            dim, heads, dropout=dropout, batch_first=True
+        )
         self.norm_cross = nn.LayerNorm(dim)
 
-        # FIX #4: Deep transformer after integration
+        # since we calculate difference and sum then cat them together, the dim doubles
         self.deep_transformer = Transformer(
-            dim,
-            depth=depth - 2,
+            dim * 2,
+            depth=num_encoder_layers,
             heads=heads,
             dim_head=dim_head,
             mlp_dim=mlp_dim,
             dropout=dropout,
         )
+        self.encoder_projection = nn.Linear(dim * 2, dim)
 
-        # FIX #5: Use learnable query slots instead of CLS token + pooling
+        self.decoder_layers = nn.ModuleList(
+            [
+                DecoderLayer(dim, heads, mlp_dim, dropout)
+                for _ in range(num_decoder_layers)
+            ]
+        )
+
         self.object_queries = nn.Parameter(torch.randn(max_sources, dim))
         self.query_pos_embed = nn.Parameter(torch.randn(max_sources, dim))
 
-        # Cross-attention: queries attend to patch features
-        self.decoder_cross_attn = nn.MultiheadAttention(
-            dim, heads, dropout=dropout, batch_first=True
-        )
-        self.decoder_self_attn = nn.MultiheadAttention(
-            dim, heads, dropout=dropout, batch_first=True
-        )
-        self.decoder_ffn = nn.Sequential(
-            nn.Linear(dim, mlp_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(mlp_dim, dim),
-        )
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm2 = nn.LayerNorm(dim)
-        self.norm3 = nn.LayerNorm(dim)
-
-        # FIX #6: Detection head per query (not from single pooled feature)
         self.det_head = nn.Sequential(
             nn.LayerNorm(dim),
             nn.Linear(dim, mlp_dim),
@@ -260,40 +285,31 @@ class BAST_Variant(nn.Module):
         x_l = self.dropout(x_l)
         x_r = self.dropout(x_r)
 
-        x_l = self.early_transformer(x_l)
-        x_r = self.early_transformer(x_r)
+        # x_l = self.early_transformer(x_l)
+        # x_r = self.early_transformer(x_r)
 
         attended_l, _ = self.cross_attn(query=x_l, key=x_r, value=x_r)
-
         attended_r, _ = self.cross_attn(query=x_r, key=x_l, value=x_l)
-        # Combine the original and the attended features.
-        # This allows the model to retain original features while adding contextual ones(i dont know if this actually works yet).
-        x = x_l + x_r + attended_l + attended_r
 
-        x = self.norm_cross(x)
+        x_l = self.norm_cross(x_l + attended_l)
+        x_r = self.norm_cross(x_r + attended_r)
+
+        x_diff = x_r - x_l  # [B, N, dim] - spatial cues
+        x_sum = x_l + x_r) * 0.5 # [B, N, dim] - spectral cues
+        x = torch.cat([x_diff, x_sum], dim=-1)
 
         # Deep processing after integration
         x = self.deep_transformer(x)  # [B, N, dim]
 
-        # --- Decoder section: No changes needed from here onwards ---
-        # FIX #5: Use learnable object queries instead of pooling
+        x = self.encoder_projection(x)
+
         queries = repeat(self.object_queries, "n d -> b n d", b=B)
         queries = queries + self.query_pos_embed.unsqueeze(0)
 
-        # Decoder layer: queries attend to encoded features
-        # Self-attention between queries
-        q_self, _ = self.decoder_self_attn(queries, queries, queries)
-        queries = self.norm1(queries + q_self)
+        for decoder_layer in self.decoder_layers:
+            queries = decoder_layer(queries, x)
 
-        # Cross-attention: queries attend to patch features
-        q_cross, _ = self.decoder_cross_attn(queries, x, x)
-        queries = self.norm2(queries + q_cross)
-
-        # FFN
-        q_ffn = self.decoder_ffn(queries)
-        queries = self.norm3(queries + q_ffn)
-
-        # FIX #6: Predict from each query slot
+        # Predict from each query slot
         predictions = self.det_head(queries)  # [B, max_sources, loc+obj+cls]
 
         # Split outputs
