@@ -43,7 +43,7 @@ LEARNING_RATE = 0.0001
 CLS_COST_WEIGHT_HUNGARIAN = 5
 LOC_COST_WEIGHT_HUNGARIAN = 0.1
 OBJ_COST_WEIGHT_HUNGARIAN = 0.1
-LOC_WEIGHT = 1
+LOC_WEIGHT = 0.4
 CLS_WEIGHT = 6
 OBJ_WEIGHT = 1
 
@@ -175,13 +175,13 @@ HPO_client.configure_experiment(
 )
 
 
-#cls_exact , loc_err , total
 # %%
 HPO_client.configure_optimization(
-    objective="cls_exact,-loc_err,-total",
+    objective="cls_exact,-loc_err,-total,cls_elem_acc,-cls,-loc,-obj",
     outcome_constraints=[
         "cls_exact >= 0.70",
         "loc_err <= 0.40",
+        "cls_elem_acc >= 0.75"
     ],
 )
 # %%
@@ -407,6 +407,32 @@ for _ in range(15):
                 )
 
 
+# %%
+best_parameters, prediction, index, name = HPO_client.get_best_parameterization()
+print("Best Parameters:", best_parameters)
+print("Prediction (mean, variance):", prediction)
+
+# Save best parameters to disk
+import json, os, datetime
+
+save_dir = "artifacts"
+os.makedirs(save_dir, exist_ok=True)
+timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+save_path = os.path.join(save_dir, f"best_hpo_params_{timestamp}.json")
+
+payload = {
+    "best_parameters": best_parameters,
+    "prediction": prediction,
+    "trial_index": int(index),
+    "arm_name": str(name),
+}
+
+with open(save_path, "w", encoding="utf-8") as f:
+    json.dump(payload, f, indent=2)
+
+print(f"Saved best parameters to {save_path}")
+
+
 # End of training
 
 # ---------------------- Test one sample (Single WAV Inference) ------------------------------#
@@ -442,9 +468,6 @@ def build_model_for_inference(num_classes: int) -> BAST_Variant:
         num_encoder_layers=TRANSFORMER_ENCODER_DEPTH,
         num_decoder_layers=TRANSFORMER_DECODER_DEPTH,
         heads=TRANSFORMER_HEADS,
-        mlp_dim=TRANSFORMER_MLP_DIM,
-        channels=INPUT_CHANNEL,
-        dim_head=TRANSFORMER_DIM_HEAD,
         dropout=DROPOUT,
         emb_dropout=EMB_DROPOUT,
         binaural_integration=BINAURAL_INTEGRATION,
