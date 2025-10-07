@@ -27,32 +27,52 @@ from torch.utils.data import DataLoader, random_split
 from datetime import datetime
 
 # %%
+# initialization params from model commented here
+# image_size,  # e.g., (129, 61) - (freq, time)
+# patch_size,  # e.g., 16
+# patch_overlap,  # e.g., 10
+# num_coordinates_output,  # e.g., 2 (azimuth, elevation) or 3 (x,y,z)
+# dim,  # embedding dimension, e.g., 512
+# num_encoder_layers=6,
+# num_decoder_layers=3,
+# heads,  # number of attention heads, e.g., 8
+# mlp_dim,  # MLP dimension, e.g., 1024
+# num_encoder_layers=6,
+# num_decoder_layers=3,
+# channels=2,
+# dim_head=64,
+# dropout=0.2,
+# emb_dropout=0.0,
+# binaural_integration="CROSS_ATTN",
+# max_sources=4,
+# num_classes_cls=1,
 
 # Configuration
-CSV_PATH = "tensor_metadata_100ms.csv"
+CSV_PATH = "tensor_metadata.csv"
 SPECTROGRAM_SIZE = [64, 19]  # [Freq (n_mels), Time frames]
 PATCH_SIZE = 8
 PATCH_OVERLAP = 4
 NUM_OUTPUT = 3
-EMBEDDING_DIM = 1024
-TRANSFORMER_DEPTH = 3
-TRANSFORMER_HEADS = 16
-TRANSFORMER_MLP_DIM = 1024
-TRANSFORMER_DIM_HEAD = 64
+EMBEDDING_DIM = 256
+TRANSFORMER_ENCODER_DEPTH = 4
+TRANSFORMER_DECODER_DEPTH = 2
+TRANSFORMER_HEADS = 8
+TRANSFORMER_MLP_DIM = 512
+TRANSFORMER_DIM_HEAD = 32
 INPUT_CHANNEL = 2
 DROPOUT = 0.2
 EMB_DROPOUT = 0.2
 TRANSFORMER_POOL = "conv"
 
 EPOCHS = 60
-BATCH_SIZE = 500
+BATCH_SIZE = 1800
 LEARNING_RATE = 0.0001
-TEST_SPLIT = 0.1
-VAL_SPLIT = 0.2
+TEST_SPLIT = 0.3
+VAL_SPLIT = 0.3
 SEED = 42
 
-LOC_WEIGHT = 0.5
-CLS_WEIGHT = 5
+LOC_WEIGHT = 0.1
+CLS_WEIGHT = 6
 OBJ_WEIGHT = 0.1
 BINAURAL_INTEGRATION = "CROSS_ATTN"
 SHARE_WEIGHTS = False
@@ -86,7 +106,7 @@ torch.manual_seed(SEED)
 np.random.seed(SEED)
 os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
 
-dataset = MultiSourceSpectrogramDataset(CSV_PATH, tensor_dir="output_tensors_100ms")
+dataset = MultiSourceSpectrogramDataset(CSV_PATH, tensor_dir="output_tensors")
 num_classes = dataset.num_classes
 print(
     f"[{datetime.now()}] (MultiSource) Samples: {len(dataset)} | Classes: {num_classes}"
@@ -150,7 +170,8 @@ net = BAST_Variant(
     patch_overlap=PATCH_OVERLAP,
     num_coordinates_output=NUM_OUTPUT,
     dim=EMBEDDING_DIM,
-    depth=TRANSFORMER_DEPTH,
+    num_encoder_layers=TRANSFORMER_ENCODER_DEPTH,
+    num_decoder_layers=TRANSFORMER_DECODER_DEPTH,
     heads=TRANSFORMER_HEADS,
     mlp_dim=TRANSFORMER_MLP_DIM,
     channels=INPUT_CHANNEL,
@@ -182,8 +203,8 @@ criterion = SetCriterionBAST(
     loc_weight=LOC_WEIGHT,
     cls_weight=CLS_WEIGHT,
     obj_weight=OBJ_WEIGHT,
-    cls_cost_weight=3,
-    loc_cost_weight=1,
+    cls_cost_weight=5,
+    loc_cost_weight=0.1,
     obj_cost_weight=0.1,
     max_sources=MAX_SOURCES,
 )
@@ -520,7 +541,7 @@ def run_single_wav_inference(
 # Execute single-sample inference if enabled
 if DO_SINGLE_SAMPLE_TEST:
     SINGLE_WAV_PATH = (
-        "dataset_parallel_100ms/sample_0047.wav"  # <-- Replace with your test WAV path
+        "dataset_parallel_100ms/sample_0057.wav"  # <-- Replace with your test WAV path
     )
     print("\n================ Single WAV Inference ================")
     # You can hardcode a checkpoint path here if desired:

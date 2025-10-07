@@ -5,7 +5,7 @@ import os
 
 def convert_directory_to_tensors(
     csv_path="dataset/dataset_metadata.csv",
-    dataset_dir="dataset",
+    dataset_dir="dataset_parallel",
     output_dir="output_tensors",
     output_csv_path="tensor_metadata.csv",
 ):
@@ -76,8 +76,8 @@ def convert_directory_to_tensors(
 if __name__ == "__main__":
     # Use the existing dataset metadata from the dataset directory
     convert_directory_to_tensors(
-        csv_path="dataset_parallel_100ms/dataset_metadata.csv",
-        dataset_dir="dataset_parallel_100ms",
-        output_dir="output_tensors_100ms",
-        output_csv_path="tensor_metadata_100ms.csv",
+        csv_path="dataset_parallel/dataset_metadata.csv",
+        dataset_dir="dataset_parallel",
+        output_dir="output_tensors",
+        output_csv_path="tensor_metadata.csv",
     )

@@ -13,6 +13,7 @@ test.py
 tensor_metadata.csv
 
 dataset/
+dataset_parallel/
 output_tensors_40ms/
 output_tensors_100ms/
 dataset_parallel_40ms/
