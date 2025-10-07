@@ -146,11 +146,10 @@ class BAST_Variant(nn.Module):
         num_coordinates_output,  # e.g., 2 (azimuth, elevation) or 3 (x,y,z)
         dim,  # embedding dimension, e.g., 512
         heads,  # number of attention heads, e.g., 8
-        mlp_dim,  # MLP dimension, e.g., 1024
         num_encoder_layers=6,
         num_decoder_layers=3,
-        channels=2,
-        dim_head=64,
+        mlp_ratio=4,
+        # channels=2,
         dropout=0.2,
         emb_dropout=0.0,
         binaural_integration="CROSS_ATTN",
@@ -166,6 +165,8 @@ class BAST_Variant(nn.Module):
         self.num_encoder_layers = num_encoder_layers
 
         # --- Compute patch grid dimensions and padding ---
+        dim_head = dim // heads
+        mlp_dim = int(dim * mlp_ratio)
         image_height, image_width = image_size
         patch_height = patch_width = patch_size
         if patch_overlap != 0:
@@ -316,29 +317,3 @@ class BAST_Variant(nn.Module):
         cls_logit = predictions[..., self.num_coordinates_output + 1 :]
 
         return loc_out, obj_logit, cls_logit
-
-
-class AngularLossWithCartesianCoordinate(nn.Module):
-    def __init__(self):
-        super(AngularLossWithCartesianCoordinate, self).__init__()
-
-    def forward(self, x, y):
-        x = x / torch.linalg.norm(x, dim=1)[:, None]
-        y = y / torch.linalg.norm(y, dim=1)[:, None]
-        dot = torch.clamp(torch.sum(x * y, dim=1), min=-0.999, max=0.999)
-        loss = torch.mean(torch.acos(dot))
-        return loss
-
-
-class MixWithCartesianCoordinate(nn.Module):
-    def __init__(self):
-        super(MixWithCartesianCoordinate, self).__init__()
-        self.mse = nn.MSELoss()
-
-    def forward(self, x, y):
-        loss1 = self.mse(x, y)
-        x = x / torch.linalg.norm(x, dim=1)[:, None]
-        y = y / torch.linalg.norm(y, dim=1)[:, None]
-        dot = torch.clamp(torch.sum(x * y, dim=1), min=-0.999, max=0.999)
-        loss2 = torch.mean(torch.acos(dot))
-        return loss1 + loss2

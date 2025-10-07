@@ -3,6 +3,33 @@ import torch.nn as nn
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 
+class AngularLossWithCartesianCoordinate(nn.Module):
+    def __init__(self):
+        super(AngularLossWithCartesianCoordinate, self).__init__()
+
+    def forward(self, x, y):
+        x = x / torch.linalg.norm(x, dim=1)[:, None]
+        y = y / torch.linalg.norm(y, dim=1)[:, None]
+        dot = torch.clamp(torch.sum(x * y, dim=1), min=-0.999, max=0.999)
+        loss = torch.mean(torch.acos(dot))
+        return loss
+
+
+class MixWithCartesianCoordinate(nn.Module):
+    def __init__(self):
+        super(MixWithCartesianCoordinate, self).__init__()
+        self.mse = nn.MSELoss()
+
+    def forward(self, x, y):
+        loss1 = self.mse(x, y)
+        x = x / torch.linalg.norm(x, dim=1)[:, None]
+        y = y / torch.linalg.norm(y, dim=1)[:, None]
+        dot = torch.clamp(torch.sum(x * y, dim=1), min=-0.999, max=0.999)
+        loss2 = torch.mean(torch.acos(dot))
+        return loss1 + loss2
+
+
+
 
 def focal_bce_with_logits(logits, targets, alpha=0.25, gamma=2.0, reduction="mean"):
     """
@@ -218,3 +245,14 @@ class SetCriterionBAST(nn.Module):
             "cls": cls_loss.detach(),
             "obj": obj_loss.detach(),
         }
+
+
+# Helper to get localization criterion
+def get_localization_criterion(name: str):
+    if name == "MSE":
+        return nn.MSELoss()
+    if name == "AD":
+        return AngularLossWithCartesianCoordinate()
+    if name == "MIX":
+        return MixWithCartesianCoordinate()
+    raise ValueError("Unknown localization loss")

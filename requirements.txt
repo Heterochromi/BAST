@@ -11,3 +11,4 @@ statsmodels
 torch
 torchsummary
 torchvision
+ax-platform[notebook]

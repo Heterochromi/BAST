@@ -11,47 +11,25 @@ Added (at bottom):
 """
 
 # %%
-from network.BAST import (
-    BAST_Variant,
-    AngularLossWithCartesianCoordinate,
-    MixWithCartesianCoordinate,
-    # SphericalVectorLoss,
-)
-from data_loading import MultiSourceSpectrogramDataset
+from network.BAST import BAST_Variant
+from data_loading import MultiSourceSpectrogramDataset , multisource_collate
 import os
-import glob
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 from datetime import datetime
+from utils import *
+from ax.api.client import Client
+from ax.api.configs import ChoiceParameterConfig, RangeParameterConfig
+from criterion_bast import SetCriterionBAST , get_localization_criterion
 
-# %%
-# initialization params from model commented here
-# image_size,  # e.g., (129, 61) - (freq, time)
-# patch_size,  # e.g., 16
-# patch_overlap,  # e.g., 10
-# num_coordinates_output,  # e.g., 2 (azimuth, elevation) or 3 (x,y,z)
-# dim,  # embedding dimension, e.g., 512
-# num_encoder_layers=6,
-# num_decoder_layers=3,
-# heads,  # number of attention heads, e.g., 8
-# mlp_dim,  # MLP dimension, e.g., 1024
-# num_encoder_layers=6,
-# num_decoder_layers=3,
-# channels=2,
-# dim_head=64,
-# dropout=0.2,
-# emb_dropout=0.0,
-# binaural_integration="CROSS_ATTN",
-# max_sources=4,
-# num_classes_cls=1,
 
 # Configuration
 CSV_PATH = "tensor_metadata.csv"
 SPECTROGRAM_SIZE = [64, 19]  # [Freq (n_mels), Time frames]
 PATCH_SIZE = 8
-PATCH_OVERLAP = 4
+PATCH_OVERLAP = 4  # change this to ZERO later
 NUM_OUTPUT = 3
 EMBEDDING_DIM = 256
 TRANSFORMER_ENCODER_DEPTH = 4
@@ -59,23 +37,24 @@ TRANSFORMER_DECODER_DEPTH = 2
 TRANSFORMER_HEADS = 8
 TRANSFORMER_MLP_DIM = 512
 TRANSFORMER_DIM_HEAD = 32
-INPUT_CHANNEL = 2
 DROPOUT = 0.2
 EMB_DROPOUT = 0.2
-TRANSFORMER_POOL = "conv"
-
-EPOCHS = 60
-BATCH_SIZE = 1800
 LEARNING_RATE = 0.0001
+CLS_COST_WEIGHT_HUNGARIAN = 5
+LOC_COST_WEIGHT_HUNGARIAN = 0.1
+OBJ_COST_WEIGHT_HUNGARIAN = 0.1
+LOC_WEIGHT = 1
+CLS_WEIGHT = 6
+OBJ_WEIGHT = 1
+
+INPUT_CHANNEL = 2
+EPOCHS = 60
+BATCH_SIZE = 400
 TEST_SPLIT = 0.3
 VAL_SPLIT = 0.3
 SEED = 42
 
-LOC_WEIGHT = 0.1
-CLS_WEIGHT = 6
-OBJ_WEIGHT = 0.1
 BINAURAL_INTEGRATION = "CROSS_ATTN"
-SHARE_WEIGHTS = False
 MAX_SOURCES = 4
 LOSS_TYPE = "MIX"
 
@@ -87,21 +66,103 @@ MODEL_NAME = "BAST"
 NUM_WORKERS = 4
 
 # %%
-
-
-# Helper to get localization criterion
-def get_localization_criterion(name: str):
-    if name == "MSE":
-        return nn.MSELoss()
-    if name == "AD":
-        return AngularLossWithCartesianCoordinate()
-    if name == "MIX":
-        return MixWithCartesianCoordinate()
-    raise ValueError("Unknown localization loss")
-
+HPO_client = Client()
+# %%
+#
+# CLS_COST_WEIGHT_HUNGARIAN = 5
+# LOC_COST_WEIGHT_HUNGARIAN = 0.1
+# OBJ_COST_WEIGHT_HUNGARIAN = 0.1
+# LOC_WEIGHT = 0.1
+# CLS_WEIGHT = 6
+# OBJ_WEIGHT = 0.1
+parameters=[
+    RangeParameterConfig(
+        name="CLS_WEIGHT",
+        bounds=(1, 10),
+        parameter_type="float",
+        scaling="linear",
+    ),
+    # RangeParameterConfig(
+    #     name="LOC_WEIGHT",
+    #     bounds=(0.1, 1),
+    #     parameter_type="float",
+    #     scaling="linear",
+    # ),
+    # RangeParameterConfig(
+    #     name="OBJ_WEIGHT",
+    #     bounds=(0.1, 1),
+    #     parameter_type="float",
+    #     scaling="linear",
+    # ),
+    RangeParameterConfig(
+        name="CLS_COST_WEIGHT_HUNGARIAN",
+        bounds=(0.1, 1),
+        parameter_type="float",
+        scaling="linear",
+    ),
+    RangeParameterConfig(
+        name="LOC_COST_WEIGHT_HUNGARIAN",
+        bounds=(0.1, 1),
+        parameter_type="float",
+        scaling="linear",
+    ),
+    RangeParameterConfig(
+        name="OBJ_COST_WEIGHT_HUNGARIAN",
+        bounds=(0.1, 1),
+        parameter_type="float",
+        scaling="linear",
+    ),
+        RangeParameterConfig(
+            name="LEARNING_RATE",
+            bounds=(1e-5, 1e-2),
+            parameter_type="float",
+            scaling="log",
+        ),
+        RangeParameterConfig(
+            name="TRANSFORMER_ENCODER_DEPTH",
+            bounds=(3, 9),
+            parameter_type="int",
+            scaling="linear",
+        ),
+        RangeParameterConfig(
+            name="TRANSFORMER_DECODER_DEPTH",
+            bounds=(2, 6),
+            parameter_type="int",
+            scaling="linear",
+        ),
+        ChoiceParameterConfig(
+            name="EMBEDDING_DIM",
+            values=[240, 384, 528, 768, 1536, 2064],  # [ 3360, 4464, 5808, 6672, 8688]  ALL EMBEDDING_DIM must be divisible by ALL TRANSFORMER_HEADS
+            parameter_type="int",
+            is_ordered=True
+        ),
+        ChoiceParameterConfig(
+            name="TRANSFORMER_HEADS",
+            values=[4, 6, 8, 12, 16],  # Common divisors
+            parameter_type="int",
+            is_ordered=True
+        ),
+        RangeParameterConfig(
+            name="TRANSFORMER_MLP_RATIO",
+            bounds=(2, 4),
+            parameter_type="float",
+            scaling="linear",
+        ),
+        RangeParameterConfig(
+            name="EMB_DROPOUT",
+            bounds=(0.0, 0.2),
+            parameter_type="float",
+            scaling="linear",
+        ),
+        RangeParameterConfig(
+            name="DROPOUT",
+            bounds=(0.0, 0.2),
+            parameter_type="float",
+            scaling="linear",
+        ),
+    ]
 
 # %%
-
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
@@ -127,13 +188,6 @@ train_ds, val_ds = random_split(
 
 # %%
 
-
-def multisource_collate(batch):
-    specs, loc_lists, cls_lists, n_list = zip(*batch)
-    specs = torch.stack(specs, dim=0)
-    return specs, loc_lists, cls_lists, torch.tensor(n_list, dtype=torch.long)
-
-
 train_loader = DataLoader(
     train_ds,
     batch_size=BATCH_SIZE,
@@ -158,12 +212,8 @@ test_loader = DataLoader(
     pin_memory=True,
     collate_fn=multisource_collate,
 )
-
 print(f"Train: {len(train_ds)} | Val: {len(val_ds)} | Test: {len(test_ds)}")
-
 # %%
-
-print(f"[{datetime.now()}] Building model ...")
 net = BAST_Variant(
     image_size=SPECTROGRAM_SIZE,
     patch_size=PATCH_SIZE,
@@ -173,9 +223,6 @@ net = BAST_Variant(
     num_encoder_layers=TRANSFORMER_ENCODER_DEPTH,
     num_decoder_layers=TRANSFORMER_DECODER_DEPTH,
     heads=TRANSFORMER_HEADS,
-    mlp_dim=TRANSFORMER_MLP_DIM,
-    channels=INPUT_CHANNEL,
-    dim_head=TRANSFORMER_DIM_HEAD,
     dropout=DROPOUT,
     emb_dropout=EMB_DROPOUT,
     binaural_integration=BINAURAL_INTEGRATION,
@@ -193,9 +240,7 @@ else:
 
 print(f"Model built successfully. Using device: {device}")
 print(f"Model parameters: {sum(p.numel() for p in net.parameters())}")
-
 # %%
-from criterion_bast import SetCriterionBAST
 
 criterion = SetCriterionBAST(
     loc_criterion=get_localization_criterion(LOSS_TYPE),
@@ -203,77 +248,14 @@ criterion = SetCriterionBAST(
     loc_weight=LOC_WEIGHT,
     cls_weight=CLS_WEIGHT,
     obj_weight=OBJ_WEIGHT,
-    cls_cost_weight=5,
-    loc_cost_weight=0.1,
-    obj_cost_weight=0.1,
+    cls_cost_weight=CLS_COST_WEIGHT_HUNGARIAN,
+    loc_cost_weight=LOC_COST_WEIGHT_HUNGARIAN,
+    obj_cost_weight=OBJ_COST_WEIGHT_HUNGARIAN,
     max_sources=MAX_SOURCES,
 )
 
 optimizer = torch.optim.AdamW(net.parameters(), lr=LEARNING_RATE, weight_decay=0.0)
-
 # %%
-
-
-def build_target_list(loc_lists, cls_lists):
-    return [{"loc": l, "cls": c} for l, c in zip(loc_lists, cls_lists)]
-
-
-def compute_batch_metrics(
-    outputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    targets: list[dict[str, torch.Tensor]],
-    criterion: "SetCriterionBAST",
-    cls_threshold: float,
-) -> dict[str, float | int]:
-    """
-    Computes:
-      - avg 3D location error (Euclidean distance in Cartesian coords) over matched pairs
-      - exact match accuracy (all class bits correct) over matched pairs
-      - element-wise accuracy over matched pairs
-    """
-    loc_out, obj_logit, cls_logit = outputs
-    B = int(loc_out.shape[0])
-    loc_err_sum = 0.0
-    matched_pairs = 0
-    exact_match = 0
-    elem_correct = 0
-    elem_total = 0
-    with torch.no_grad():
-        for b in range(B):
-            gt_loc = targets[b]["loc"].to(loc_out.device)
-            gt_cls = targets[b]["cls"].to(loc_out.device)
-            N = int(gt_loc.size(0))
-            if N == 0:
-                continue
-            pred_loc_b = loc_out[b]
-            pred_obj_b = obj_logit[b]
-            pred_cls_b = cls_logit[b]
-            pred_idx, gt_idx = criterion._hungarian(
-                pred_loc_b, pred_obj_b, pred_cls_b, gt_loc, gt_cls
-            )
-            if pred_idx.numel() == 0:
-                continue
-            pl = pred_loc_b[pred_idx]  # [M, 3] predicted Cartesian (x,y,z)
-            gl = gt_loc[gt_idx]  # [M, 3] ground-truth Cartesian (x,y,z)
-            # 3D Euclidean distance per matched pair
-            loc_err = torch.linalg.norm(pl - gl, dim=-1)
-            loc_err_sum += loc_err.sum().item()
-            matched_pairs += int(pl.size(0))
-
-            # Classification metrics on matched pairs
-            pred_cls_prob = torch.sigmoid(pred_cls_b[pred_idx])
-            pred_bin = (pred_cls_prob >= cls_threshold).float()
-            gt_cls_m = gt_cls[gt_idx]
-            exact_match += pred_bin.eq(gt_cls_m).all(dim=1).sum().item()
-            elem_correct += pred_bin.eq(gt_cls_m).sum().item()
-            elem_total += int(pred_bin.numel())
-    metrics: dict[str, float | int] = {
-        "loc_err": (loc_err_sum / matched_pairs) if matched_pairs else 0.0,
-        "cls_exact": (exact_match / matched_pairs) if matched_pairs else 0.0,
-        "cls_elem_acc": (elem_correct / elem_total) if elem_total else 0.0,
-        "matched_pairs": matched_pairs,
-    }
-    return metrics
-
 
 def validate(epoch):
     net.eval()
@@ -368,7 +350,7 @@ for epoch in range(1, EPOCHS + 1):
         best_val = val_metrics["total"]
         save_path = os.path.join(
             MODEL_SAVE_DIR,
-            f"{MODEL_NAME}_{BINAURAL_INTEGRATION}_{LOSS_TYPE}_DET_{'SP' if SHARE_WEIGHTS else 'NSP'}_best.pt",
+            f"{MODEL_NAME}_{BINAURAL_INTEGRATION}_{LOSS_TYPE}_DET_best.pt",
         )
         torch.save(net.state_dict(), save_path)
         print(f"  -> New best model saved to {save_path}")
@@ -397,23 +379,6 @@ TOP_K_CLASSES = 4  # how many top class probabilities to display
 from mel_spec_tensor import generate_mel_spectrogram_torch_tensor
 
 
-def find_latest_checkpoint(directory: str, pattern: str = "*.pt") -> str | None:
-    matches = glob.glob(os.path.join(directory, pattern))
-    if not matches:
-        return None
-    matches.sort(key=os.path.getmtime, reverse=True)
-    return matches[0]
-
-
-def strip_module_prefix(state_dict: dict) -> dict:
-    """
-    Handles loading a DataParallel-saved state_dict into a non-parallel model.
-    """
-    if not any(k.startswith("module.") for k in state_dict.keys()):
-        return state_dict
-    return {k.replace("module.", "", 1): v for k, v in state_dict.items()}
-
-
 def build_model_for_inference(num_classes: int) -> BAST_Variant:
     model = BAST_Variant(
         image_size=SPECTROGRAM_SIZE,
@@ -421,7 +386,8 @@ def build_model_for_inference(num_classes: int) -> BAST_Variant:
         patch_overlap=PATCH_OVERLAP,
         num_coordinates_output=NUM_OUTPUT,
         dim=EMBEDDING_DIM,
-        depth=TRANSFORMER_DEPTH,
+        num_encoder_layers=TRANSFORMER_ENCODER_DEPTH,
+        num_decoder_layers=TRANSFORMER_DECODER_DEPTH,
         heads=TRANSFORMER_HEADS,
         mlp_dim=TRANSFORMER_MLP_DIM,
         channels=INPUT_CHANNEL,
@@ -559,6 +525,7 @@ if DO_SINGLE_SAMPLE_TEST:
 
 # %%
 def test(epoch):
+    load_checkpoint_into_model(net, "", device)
     net.eval()
     running_loss = {"total": 0.0, "loc": 0.0, "cls": 0.0, "obj": 0.0, "batches": 0}
     metric_accum = {
@@ -602,36 +569,9 @@ def test(epoch):
 test(1)
 
 
-# # %%
-# def inspect_one_batch():
-#     specs, loc_lists, cls_lists, n_list = next(iter(test_loader))
-#     specs = specs.to(device)
-#     outputs = net(specs).to(device)
-#     targets = build_target_list(loc_lists, cls_lists)
-#     loc_out, obj_logit, cls_logit = outputs
-#     b = 0
-#     gt_loc = targets[b]["loc"]
-#     gt_cls = targets[b]["cls"]
-#     pred_loc_b = loc_out[b]
-#     pred_obj_b = obj_logit[b]
-#     pred_cls_b = cls_logit[b]
-#     pi, gi = criterion._hungarian(pred_loc_b, pred_obj_b, pred_cls_b, gt_loc, gt_cls)
-#     print("Batch0 matches (pred_idx -> gt_idx):")
-#     for p, g in zip(pi.tolist(), gi.tolist()):
-#         print(
-#             f"  pred_slot {p} -> gt {g}  | pred_loc {pred_loc_b[p].detach().cpu().numpy()}  gt_loc {gt_loc[g].numpy()}"
-#         )
-#         pc = torch.sigmoid(pred_cls_b[p]).detach().cpu().numpy()
-#         gc = gt_cls[g].numpy()
-#         print("    cls probs:", pc, "gt one-hot:", gc)
-
-
-# # %%
-# inspect_one_batch()
-
 
 # %%
-#
+
 from torch.utils.data import DataLoader, Subset
 from debug_utils import overfit_subset
 
