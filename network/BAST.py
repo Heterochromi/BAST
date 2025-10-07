@@ -145,8 +145,6 @@ class BAST_Variant(nn.Module):
         patch_overlap,  # e.g., 10
         num_coordinates_output,  # e.g., 2 (azimuth, elevation) or 3 (x,y,z)
         dim,  # embedding dimension, e.g., 512
-        num_encoder_layers=6,
-        num_decoder_layers=3,
         heads,  # number of attention heads, e.g., 8
         mlp_dim,  # MLP dimension, e.g., 1024
         num_encoder_layers=6,
