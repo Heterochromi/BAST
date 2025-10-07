@@ -293,7 +293,7 @@ class BAST_Variant(nn.Module):
         x_r = self.norm_cross(x_r + attended_r)
 
         x_diff = x_r - x_l  # [B, N, dim] - spatial cues
-        x_sum = x_l + x_r) * 0.5 # [B, N, dim] - spectral cues
+        x_sum = (x_l + x_r) * 0.5  # [B, N, dim] - spectral cues
         x = torch.cat([x_diff, x_sum], dim=-1)
 
         # Deep processing after integration
