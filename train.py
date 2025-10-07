@@ -48,8 +48,8 @@ CLS_WEIGHT = 6
 OBJ_WEIGHT = 1
 
 INPUT_CHANNEL = 2
-EPOCHS = 60
-BATCH_SIZE = 400
+EPOCHS = 15
+BATCH_SIZE = 210
 TEST_SPLIT = 0.3
 VAL_SPLIT = 0.3
 SEED = 42
@@ -132,7 +132,7 @@ parameters=[
         ),
         ChoiceParameterConfig(
             name="EMBEDDING_DIM",
-            values=[240, 384, 528, 768, 1536, 2064],  # [ 3360, 4464, 5808, 6672, 8688]  ALL EMBEDDING_DIM must be divisible by ALL TRANSFORMER_HEADS
+            values=[240, 384, 528, 768, 1536 , 2064],  # [3360, 4464,5808, 6672, 8688]  ALL EMBEDDING_DIM must be divisible by ALL TRANSFORMER_HEADS
             parameter_type="int",
             is_ordered=True
         ),
@@ -160,8 +160,30 @@ parameters=[
             parameter_type="float",
             scaling="linear",
         ),
+        RangeParameterConfig(
+            name="WEIGHT_DECAY",
+            bounds=(1e-6, 1e-2),
+            parameter_type="float",
+            scaling="log",
+        )
     ]
 
+# %%
+HPO_client.configure_experiment(
+    parameters=parameters,
+    name="Binaural SELD Experiment",
+)
+
+
+#cls_exact , loc_err , total
+# %%
+HPO_client.configure_optimization(
+    objective="cls_exact,-loc_err,-total",
+    outcome_constraints=[
+        "cls_exact >= 0.70",
+        "loc_err <= 0.40",
+    ],
+)
 # %%
 torch.manual_seed(SEED)
 np.random.seed(SEED)
@@ -214,50 +236,55 @@ test_loader = DataLoader(
 )
 print(f"Train: {len(train_ds)} | Val: {len(val_ds)} | Test: {len(test_ds)}")
 # %%
-net = BAST_Variant(
-    image_size=SPECTROGRAM_SIZE,
-    patch_size=PATCH_SIZE,
-    patch_overlap=PATCH_OVERLAP,
-    num_coordinates_output=NUM_OUTPUT,
-    dim=EMBEDDING_DIM,
-    num_encoder_layers=TRANSFORMER_ENCODER_DEPTH,
-    num_decoder_layers=TRANSFORMER_DECODER_DEPTH,
-    heads=TRANSFORMER_HEADS,
-    dropout=DROPOUT,
-    emb_dropout=EMB_DROPOUT,
-    binaural_integration=BINAURAL_INTEGRATION,
-    max_sources=MAX_SOURCES,
-    num_classes_cls=num_classes,
-)
-# %%
-use_cuda = torch.cuda.is_available()
-device = torch.device("cuda" if use_cuda else "cpu")
-# %%
-if use_cuda and GPU_LIST:
-    net = nn.DataParallel(net, device_ids=GPU_LIST).to(device)
-else:
-    net = net.to(device)
+def load_model_with_hpo_parameters(hpo_parameters):
+    net = BAST_Variant(
+        image_size=SPECTROGRAM_SIZE,
+        patch_size=PATCH_SIZE,
+        patch_overlap=PATCH_OVERLAP,
+        num_coordinates_output=NUM_OUTPUT,
+        dim=hpo_parameters['EMBEDDING_DIM'],
+        num_encoder_layers=hpo_parameters['TRANSFORMER_ENCODER_DEPTH'],
+        num_decoder_layers=hpo_parameters['TRANSFORMER_DECODER_DEPTH'],
+        mlp_ratio=hpo_parameters['TRANSFORMER_MLP_RATIO'],
+        heads=hpo_parameters['TRANSFORMER_HEADS'],
+        dropout=hpo_parameters['DROPOUT'],
+        emb_dropout=hpo_parameters['EMB_DROPOUT'],
+        binaural_integration=BINAURAL_INTEGRATION,
+        max_sources=MAX_SOURCES,
+        num_classes_cls=num_classes,
+    )
 
-print(f"Model built successfully. Using device: {device}")
-print(f"Model parameters: {sum(p.numel() for p in net.parameters())}")
+    use_cuda = torch.cuda.is_available()
+    device = torch.device("cuda" if use_cuda else "cpu")
+
+    if use_cuda and GPU_LIST:
+        net = nn.DataParallel(net, device_ids=GPU_LIST).to(device)
+    else:
+        net = net.to(device)
+
+    print(f"Model built successfully. Using device: {device}")
+    print(f"Model parameters: {sum(p.numel() for p in net.parameters())}")
+    return net , device
 # %%
-
-criterion = SetCriterionBAST(
-    loc_criterion=get_localization_criterion(LOSS_TYPE),
-    num_classes=num_classes,
-    loc_weight=LOC_WEIGHT,
-    cls_weight=CLS_WEIGHT,
-    obj_weight=OBJ_WEIGHT,
-    cls_cost_weight=CLS_COST_WEIGHT_HUNGARIAN,
-    loc_cost_weight=LOC_COST_WEIGHT_HUNGARIAN,
-    obj_cost_weight=OBJ_COST_WEIGHT_HUNGARIAN,
-    max_sources=MAX_SOURCES,
-)
-
-optimizer = torch.optim.AdamW(net.parameters(), lr=LEARNING_RATE, weight_decay=0.0)
+def load_criterion_with_hpo(hpo_parameters):
+    criterion = SetCriterionBAST(
+        loc_criterion=get_localization_criterion(LOSS_TYPE),
+        num_classes=num_classes,
+        loc_weight=LOC_WEIGHT,
+        cls_weight=hpo_parameters['CLS_WEIGHT'],
+        obj_weight=OBJ_WEIGHT,
+        cls_cost_weight=hpo_parameters["CLS_COST_WEIGHT_HUNGARIAN"],
+        loc_cost_weight=hpo_parameters["LOC_COST_WEIGHT_HUNGARIAN"],
+        obj_cost_weight=hpo_parameters["OBJ_COST_WEIGHT_HUNGARIAN"],
+        max_sources=MAX_SOURCES,
+    )
+    return criterion
 # %%
-
-def validate(epoch):
+def load_optimizer_with_hpo(net, hpo_hyperparameter):
+    optimizer = torch.optim.AdamW(net.parameters(), lr=hpo_hyperparameter["LEARNING_RATE"], weight_decay=hpo_hyperparameter['WEIGHT_DECAY'])
+    return optimizer
+# %%
+def validate(net ,epoch , criterion , device):
     net.eval()
     running_loss = {"total": 0.0, "loc": 0.0, "cls": 0.0, "obj": 0.0, "batches": 0}
     metric_accum = {
@@ -298,62 +325,88 @@ def validate(epoch):
     )
     return {**running_loss, **metric_accum}
 
-
 # %%
-best_val = float("inf")
-for epoch in range(1, EPOCHS + 1):
-    net.train()
-    epoch_losses = {"total": 0.0, "loc": 0.0, "cls": 0.0, "obj": 0.0, "batches": 0}
-    metric_epoch = {
-        "loc_err": 0.0,
-        "cls_exact": 0.0,
-        "cls_elem_acc": 0.0,
-        "matched_pairs": 0,
-        "batches": 0,
-    }
-    for specs, loc_lists, cls_lists, n_list in train_loader:
-        specs = specs.to(device)
-        outputs = net(specs)
-        targets = build_target_list(loc_lists, cls_lists)
-        loss_dict = criterion(outputs, targets)
-        loss = loss_dict["total"]
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        epoch_losses["total"] += float(loss_dict["total"])
-        epoch_losses["loc"] += float(loss_dict["loc"])
-        epoch_losses["cls"] += float(loss_dict["cls"])
-        epoch_losses["obj"] += float(loss_dict["obj"])
-        epoch_losses["batches"] += 1
-        batch_metrics = compute_batch_metrics(
-            outputs, targets, criterion, CLS_THRESHOLD
-        )
-        mp = batch_metrics["matched_pairs"]
-        if mp > 0:
-            for mk in ("loc_err", "cls_exact", "cls_elem_acc"):
-                metric_epoch[mk] += batch_metrics[mk] * mp
-            metric_epoch["matched_pairs"] += mp
-        metric_epoch["batches"] += 1
-    for k in ("total", "loc", "cls", "obj"):
-        epoch_losses[k] /= max(epoch_losses["batches"], 1)
-    if metric_epoch["matched_pairs"] > 0:
-        for mk in ("loc_err", "cls_exact", "cls_elem_acc"):
-            metric_epoch[mk] /= metric_epoch["matched_pairs"]
-    print(
-        f"[TRAIN] Epoch {epoch} | Total {epoch_losses['total']:.4f} | Loc {epoch_losses['loc']:.4f} | "
-        f"Cls {epoch_losses['cls']:.4f} | Obj {epoch_losses['obj']:.4f} | "
-        f"loc_err {metric_epoch['loc_err']:.3f}      |"
-        f"ClsExact {metric_epoch['cls_exact']:.3f} | ClsElem {metric_epoch['cls_elem_acc']:.3f} |"
-    )
-    val_metrics = validate(epoch)
-    if val_metrics["total"] < best_val:
-        best_val = val_metrics["total"]
-        save_path = os.path.join(
-            MODEL_SAVE_DIR,
-            f"{MODEL_NAME}_{BINAURAL_INTEGRATION}_{LOSS_TYPE}_DET_best.pt",
-        )
-        torch.save(net.state_dict(), save_path)
-        print(f"  -> New best model saved to {save_path}")
+for _ in range(15):
+    trials = HPO_client.get_next_trials(max_trials=1)
+    torch.cuda.empty_cache()
+    for trial_i , parameters in trials.items():
+            # training set up
+            best_val = float("inf")
+            net , device = load_model_with_hpo_parameters(parameters)
+            criterion = load_criterion_with_hpo(parameters)
+            optimizer = load_optimizer_with_hpo(net,parameters)
+            is_early_stopped = False
+            for epoch in range(1, EPOCHS + 1):
+                net.train()
+                epoch_losses = {"total": 0.0, "loc": 0.0, "cls": 0.0, "obj": 0.0, "batches": 0}
+                metric_epoch = {
+                    "loc_err": 0.0,
+                    "cls_exact": 0.0,
+                    "cls_elem_acc": 0.0,
+                    "matched_pairs": 0,
+                    "batches": 0,
+                }
+                for specs, loc_lists, cls_lists, n_list in train_loader:
+                    specs = specs.to(device)
+                    outputs = net(specs)
+                    targets = build_target_list(loc_lists, cls_lists)
+                    loss_dict = criterion(outputs, targets)
+                    loss = loss_dict["total"]
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    epoch_losses["total"] += float(loss_dict["total"])
+                    epoch_losses["loc"] += float(loss_dict["loc"])
+                    epoch_losses["cls"] += float(loss_dict["cls"])
+                    epoch_losses["obj"] += float(loss_dict["obj"])
+                    epoch_losses["batches"] += 1
+                    batch_metrics = compute_batch_metrics(
+                        outputs, targets, criterion, CLS_THRESHOLD
+                    )
+                    mp = batch_metrics["matched_pairs"]
+                    if mp > 0:
+                        for mk in ("loc_err", "cls_exact", "cls_elem_acc"):
+                            metric_epoch[mk] += batch_metrics[mk] * mp
+                        metric_epoch["matched_pairs"] += mp
+                    metric_epoch["batches"] += 1
+                for k in ("total", "loc", "cls", "obj"):
+                    epoch_losses[k] /= max(epoch_losses["batches"], 1)
+                if metric_epoch["matched_pairs"] > 0:
+                    for mk in ("loc_err", "cls_exact", "cls_elem_acc"):
+                        metric_epoch[mk] /= metric_epoch["matched_pairs"]
+                print(
+                    f"[TRAIN] Epoch {epoch} | Total {epoch_losses['total']:.4f} | Loc {epoch_losses['loc']:.4f} | "
+                    f"Cls {epoch_losses['cls']:.4f} | Obj {epoch_losses['obj']:.4f} | "
+                    f"loc_err {metric_epoch['loc_err']:.3f}      |"
+                    f"ClsExact {metric_epoch['cls_exact']:.3f} | ClsElem {metric_epoch['cls_elem_acc']:.3f} |"
+                )
+                val_metrics = validate(net ,epoch , criterion , device)
+                if val_metrics["total"] < best_val:
+                    best_val = val_metrics["total"]
+                    save_path = os.path.join(
+                        MODEL_SAVE_DIR,
+                        f"{MODEL_NAME}_{BINAURAL_INTEGRATION}_{LOSS_TYPE}_DET_{trial_i}.pt",
+                    )
+
+                    torch.save(net.state_dict(), save_path)
+                    print(f"  -> New best model saved to {save_path}")
+                HPO_client.attach_data(
+                    trial_index=trial_i,
+                    raw_data=val_metrics,
+                    progression=epoch,
+                )
+                if HPO_client.should_stop_trial_early(trial_index=trial_i):
+                    is_early_stopped = True
+                    HPO_client.mark_trial_early_stopped(trial_index=trial_i)
+                    break
+            if is_early_stopped:
+                break
+            if not is_early_stopped:
+                HPO_client.complete_trial(
+                    trial_index=trial_i,
+                )
+
+
 # End of training
 
 # ---------------------- Test one sample (Single WAV Inference) ------------------------------#
