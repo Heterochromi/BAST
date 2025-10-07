@@ -133,6 +133,12 @@ class MultiSourceSpectrogramDataset(Dataset):
         return spec, loc_targets, cls_targets, n
 
 
+def multisource_collate(batch):
+    specs, loc_lists, cls_lists, n_list = zip(*batch)
+    specs = torch.stack(specs, dim=0)
+    return specs, loc_lists, cls_lists, torch.tensor(n_list, dtype=torch.long)
+
+
 if __name__ == "__main__":
     dataset = MultiSourceSpectrogramDataset(
         "tensor_metadata_100ms.csv", tensor_dir="output_tensors_100ms"
