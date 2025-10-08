@@ -244,7 +244,7 @@ class BAST_Variant(nn.Module):
             dim * 2,
             depth=num_encoder_layers,
             heads=heads,
-            dim_head=dim_head,
+            dim_head=(dim * 2) // heads,
             mlp_dim=mlp_dim,
             dropout=dropout,
         )
