@@ -34,17 +34,17 @@ LOSS_TYPE = "MIX"
 CLS_COST_WEIGHT_HUNGARIAN = 0.5
 LOC_COST_WEIGHT_HUNGARIAN = 0.5
 OBJ_COST_WEIGHT_HUNGARIAN = 0.5
-LOC_WEIGHT = 0.4
-CLS_WEIGHT = 6.0
+LOC_WEIGHT = 0.3
+CLS_WEIGHT = 7.0
 OBJ_WEIGHT = 1.0
 
 # Optimization / training
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-4
 EPOCHS = 60
-BATCH_SIZE = 128
-TEST_SPLIT = 0.3
-VAL_SPLIT = 0.3
+BATCH_SIZE = 32
+TEST_SPLIT = 0.8
+VAL_SPLIT = 0.5
 SEED = 42
 NUM_WORKERS = 4
 CLS_THRESHOLD = 0.5
@@ -55,15 +55,16 @@ MODEL_SAVE_DIR = "./output/models/"
 MODEL_NAME = "BASTCONV_MANUAL"
 
 # Tokenizer / conv front-end for BAST_CONV
-N_CONV_INPUT_CHANNELS = 1  # BAST_CONV internally splits stereo to two 1-ch streams
+N_CONV_INPUT_CHANNELS = 1
 TOKEN_KERNEL_SIZE = 3
 TOKEN_STRIDE = 1
 TOKEN_PADDING = 1
-POOL_KERNEL_SIZE = 3
-POOL_STRIDE = 2
-POOL_PADDING = 1
-N_CONV_LAYERS = 1
-
+POOL_KERNEL_SIZE = 2
+POOL_STRIDE = 1
+POOL_PADDING = 0
+N_CONV_LAYERS = 3
+IN_PLANES = 128
+CONV_BIAS = True
 # %%
 # Data setup
 torch.manual_seed(SEED)
@@ -142,6 +143,8 @@ def build_model_manual():
         pooling_stride=POOL_STRIDE,
         pooling_padding=POOL_PADDING,
         n_conv_layers=N_CONV_LAYERS,
+        in_planes=IN_PLANES,
+        conv_bias=CONV_BIAS,
     )
 
     use_cuda = torch.cuda.is_available()
@@ -244,6 +247,7 @@ scheduler = CyclicLR(
     # mode="triangular2",
     cycle_momentum=False,
 )
+# %%
 for epoch in range(1, EPOCHS + 1):
     net.train()
     epoch_losses = {

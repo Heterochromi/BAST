@@ -138,9 +138,9 @@ class DecoderLayer(nn.Module):
 class Tokenizer(nn.Module):
     def __init__(
         self,
-        kernel_size,
-        stride,
-        padding,
+        kernel_size=3,
+        stride=1,
+        padding=1,
         pooling_kernel_size=3,
         pooling_stride=2,
         pooling_padding=1,
@@ -148,7 +148,7 @@ class Tokenizer(nn.Module):
         n_input_channels=3,
         n_output_channels=64,
         in_planes=64,
-        activation=None,
+        activation=nn.ReLU,
         max_pool=True,
         conv_bias=False,
     ):
@@ -173,7 +173,6 @@ class Tokenizer(nn.Module):
                         padding=(padding, padding),
                         bias=conv_bias,
                     ),
-                    nn.Identity() if not exists(activation) else activation(),
                     nn.MaxPool2d(
                         kernel_size=pooling_kernel_size,
                         stride=pooling_stride,
@@ -218,6 +217,8 @@ class BAST_CONV(nn.Module):
         pooling_stride=2,
         pooling_padding=1,
         n_conv_layers=1,
+        in_planes=64,
+        conv_bias=False,
     ):
         super().__init__()
         self.binaural_integration = binaural_integration
@@ -241,10 +242,11 @@ class BAST_CONV(nn.Module):
             pooling_kernel_size=pooling_kernel_size,
             pooling_stride=pooling_stride,
             pooling_padding=pooling_padding,
+            in_planes=in_planes,
             max_pool=True,
             activation=nn.ReLU,
             n_conv_layers=n_conv_layers,
-            conv_bias=False,
+            conv_bias=conv_bias,
         )
 
         length = self.tokenizer.sequence_length(
