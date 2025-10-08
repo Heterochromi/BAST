@@ -217,12 +217,17 @@ class BAST_Variant(nn.Module):
                 c=1,
                 k1=patch_height,
                 k2=patch_width,
-                n=self.num_patches,
+                n=self. ,
             ),
             nn.Linear(patch_dim, dim),
         )
 
-        self.pos_embedding = nn.Parameter(torch.randn(1, self.num_patches, dim))
+        # self.pos_embedding = nn.Parameter(torch.randn(1, self.num_patches, dim))
+        self.pos_embedding = nn.Parameter(
+            torch.zeros(1, self.num_patches, dim), requires_grad=True
+        )
+        nn.init.trunc_normal_(self.pos_embedding, std=0.2)
+
         self.dropout = nn.Dropout(emb_dropout)
 
         # self.early_transformer = Transformer(
