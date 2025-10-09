@@ -25,7 +25,7 @@ TRANSFORMER_MLP_RATIO = 4
 DROPOUT = 0.1
 EMB_DROPOUT = 0.1
 
-# Binaural integration and detection
+# Binaural integration
 BINAURAL_INTEGRATION = "CROSS_ATTN"
 MAX_SOURCES = 4
 LOSS_TYPE = "MIX"
@@ -33,16 +33,14 @@ LOSS_TYPE = "MIX"
 # Hungarian matching and loss weights
 CLS_COST_WEIGHT_HUNGARIAN = 1
 LOC_COST_WEIGHT_HUNGARIAN = 1
-OBJ_COST_WEIGHT_HUNGARIAN = 1
 LOC_WEIGHT = 0.1
 CLS_WEIGHT = 0.5
-OBJ_WEIGHT = 1.0
 
 # Optimization / training
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-4
 EPOCHS = 60
-BATCH_SIZE = 1200
+BATCH_SIZE = 1800
 TEST_SPLIT = 0.7
 VAL_SPLIT = 0.5
 SEED = 42
@@ -165,29 +163,20 @@ def build_criterion_manual():
     cls_focal_gamma = 2.0
     cls_pos_weight = 6
 
-    obj_use_focal = True
-    obj_focal_alpha = None
-    obj_focal_gamma = 2.0
-    obj_pos_weight = 2
+    # Objectness removed
 
     criterion = SetCriterionBAST(
         loc_criterion=get_localization_criterion(LOSS_TYPE),
         num_classes=num_classes,
         loc_weight=LOC_WEIGHT,
         cls_weight=CLS_WEIGHT,
-        obj_weight=OBJ_WEIGHT,
         cls_cost_weight=CLS_COST_WEIGHT_HUNGARIAN,
         loc_cost_weight=LOC_COST_WEIGHT_HUNGARIAN,
-        obj_cost_weight=OBJ_COST_WEIGHT_HUNGARIAN,
         max_sources=MAX_SOURCES,
-        # New exposed hyperparameters
+        # Exposed hyperparameters for classification focal loss
         cls_focal_alpha=cls_focal_alpha,
         cls_focal_gamma=cls_focal_gamma,
         cls_pos_weight=cls_pos_weight,
-        obj_use_focal=obj_use_focal,
-        obj_focal_alpha=obj_focal_alpha,
-        obj_focal_gamma=obj_focal_gamma,
-        obj_pos_weight=obj_pos_weight,
     )
     return criterion
 
@@ -204,7 +193,7 @@ def build_optimizer_manual(net):
 # %%
 def validate(net, epoch, criterion, device):
     net.eval()
-    running_loss = {"total": 0.0, "loc": 0.0, "cls": 0.0, "obj": 0.0, "batches": 0}
+    running_loss = {"total": 0.0, "loc": 0.0, "cls": 0.0, "batches": 0}
     metric_accum = {
         "loc_err": 0.0,
         "cls_exact": 0.0,
@@ -218,7 +207,7 @@ def validate(net, epoch, criterion, device):
             outputs = net(specs)
             targets = build_target_list(loc_lists, cls_lists)
             losses = criterion(outputs, targets)
-            for k in ("total", "loc", "cls", "obj"):
+            for k in ("total", "loc", "cls"):
                 running_loss[k] += float(losses[k])
             running_loss["batches"] += 1
             batch_metrics = compute_batch_metrics(
@@ -230,13 +219,13 @@ def validate(net, epoch, criterion, device):
                     metric_accum[mk] += batch_metrics[mk] * mp
                 metric_accum["matched_pairs"] += mp
             metric_accum["batches"] += 1
-    for k in ("total", "loc", "cls", "obj"):
+    for k in ("total", "loc", "cls"):
         running_loss[k] /= max(running_loss["batches"], 1)
     if metric_accum["matched_pairs"] > 0:
         for mk in ("loc_err", "cls_exact", "cls_elem_acc"):
             metric_accum[mk] /= metric_accum["matched_pairs"]
     print(
-        f"[VAL] Epoch {epoch} | Total {running_loss['total']:.4f} | Loc {running_loss['loc']:.4f} | Cls {running_loss['cls']:.4f} | Obj {running_loss['obj']:.4f} | loc_err {metric_accum['loc_err']:.3f} | ClsExact {metric_accum['cls_exact']:.3f} | ClsElem {metric_accum['cls_elem_acc']:.3f}"
+        f"[VAL] Epoch {epoch} | Total {running_loss['total']:.4f} | Loc {running_loss['loc']:.4f} | Cls {running_loss['cls']:.4f} | loc_err {metric_accum['loc_err']:.3f} | ClsExact {metric_accum['cls_exact']:.3f} | ClsElem {metric_accum['cls_elem_acc']:.3f}"
     )
     return {**running_loss, **metric_accum}
 
@@ -254,15 +243,15 @@ batches_per_epoch = len(train_loader)
 total_epochs = 60
 num_cycles = 6
 
-steps_per_cycle = EPOCHS * batches_per_epoch
+steps_per_cycle = (EPOCHS // 6) * batches_per_epoch
 step_size_up = steps_per_cycle // 2
 
 scheduler = CyclicLR(
     optimizer,
     base_lr=2e-5,
-    max_lr=1e-3,
+    max_lr=3e-4,
     step_size_up=step_size_up,
-    # mode="triangular2",
+    mode="triangular2",
     cycle_momentum=False,
 )
 # %%
@@ -272,7 +261,6 @@ for epoch in range(1, EPOCHS + 1):
         "total": 0.0,
         "loc": 0.0,
         "cls": 0.0,
-        "obj": 0.0,
         "batches": 0,
     }
     metric_epoch = {
@@ -290,6 +278,7 @@ for epoch in range(1, EPOCHS + 1):
         loss = loss_dict["total"]
         optimizer.zero_grad()
         loss.backward()
+        # torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
         optimizer.step()
         scheduler.step()
 
@@ -297,7 +286,7 @@ for epoch in range(1, EPOCHS + 1):
         epoch_losses["total"] += loss_dict["total"].detach().item()
         epoch_losses["loc"] += float(loss_dict["loc"])
         epoch_losses["cls"] += float(loss_dict["cls"])
-        epoch_losses["obj"] += float(loss_dict["obj"])
+
         epoch_losses["batches"] += 1
 
         # Metrics
@@ -311,14 +300,14 @@ for epoch in range(1, EPOCHS + 1):
             metric_epoch["matched_pairs"] += mp
         metric_epoch["batches"] += 1
 
-    for k in ("total", "loc", "cls", "obj"):
+    for k in ("total", "loc", "cls"):
         epoch_losses[k] /= max(epoch_losses["batches"], 1)
     if metric_epoch["matched_pairs"] > 0:
         for mk in ("loc_err", "cls_exact", "cls_elem_acc"):
             metric_epoch[mk] /= metric_epoch["matched_pairs"]
 
     print(
-        f"[TRAIN] Epoch {epoch} | Total {epoch_losses['total']:.4f} | Loc {epoch_losses['loc']:.4f} | Cls {epoch_losses['cls']:.4f} | Obj {epoch_losses['obj']:.4f} | loc_err {metric_epoch['loc_err']:.3f} | ClsExact {metric_epoch['cls_exact']:.3f} | ClsElem {metric_epoch['cls_elem_acc']:.3f} |"
+        f"[TRAIN] Epoch {epoch} | Total {epoch_losses['total']:.4f} | Loc {epoch_losses['loc']:.4f} | Cls {epoch_losses['cls']:.4f} | loc_err {metric_epoch['loc_err']:.3f} | ClsExact {metric_epoch['cls_exact']:.3f} | ClsElem {metric_epoch['cls_elem_acc']:.3f} |"
     )
 
     # Validate and save best
@@ -336,7 +325,7 @@ for epoch in range(1, EPOCHS + 1):
 # Optional: Single-sample inference utilities (using BAST_CONV)
 # Set DO_SINGLE_SAMPLE_TEST = True and adjust SINGLE_WAV_PATH to try it.
 DO_SINGLE_SAMPLE_TEST = False
-OBJECTNESS_THRESHOLD = 0.4
+# OBJECTNESS_THRESHOLD removed (no objectness head)
 TOP_K_CLASSES = 4
 
 # (import moved inside run_single_wav_inference)
@@ -407,7 +396,6 @@ def prepare_spectrogram_tensor(mel_tensor: torch.Tensor) -> torch.Tensor:
 def run_single_wav_inference(
     wav_path: str,
     checkpoint_path: str | None,
-    objectness_threshold: float = 0.5,
     top_k_classes: int = 3,
 ):
     if not os.path.exists(wav_path):
@@ -436,22 +424,18 @@ def run_single_wav_inference(
         )
         mel_tensor = prepare_spectrogram_tensor(mel_tensor)  # shape [2, 64, T]
         batch = mel_tensor.unsqueeze(0).to(dev)  # [1, 2, 64, T]
-        loc_out, obj_logit, cls_logit = inf_model(batch)
+        loc_out, cls_logit = inf_model(batch)
         loc_out = loc_out[0]
-        obj_prob = torch.sigmoid(obj_logit[0])
         cls_prob = torch.sigmoid(cls_logit[0])
 
-        sorted_indices = torch.argsort(obj_prob, descending=True)
-        print("\n[Inference] Predictions (sorted by objectness):")
-        print(
-            f"{'Slot':<4} {'ObjProb':>8} | {'x':>8} {'y':>8} {'z':>8} | Top classes (prob)"
-        )
+        print("\n[Inference] Predictions:")
+        print(f"{'Slot':<4} | {'x':>8} {'y':>8} {'z':>8} | Top classes (prob)")
         print("-" * 70)
-        for rank, idx in enumerate(sorted_indices.tolist()):
-            p_obj = obj_prob[idx].item()
-            if p_obj < objectness_threshold:
-                continue
-            x, y, z = loc_out[idx].tolist()
+        num_slots = loc_out.shape[0]
+        for idx in range(num_slots):
+            coords = loc_out[idx].tolist()
+            coords = (coords + [0.0, 0.0, 0.0])[:3]  # pad for consistent printing
+            x, y, z = coords
             cls_vec = cls_prob[idx]
             topk = torch.topk(cls_vec, k=min(top_k_classes, cls_vec.shape[0]))
             class_entries = []
@@ -459,7 +443,7 @@ def run_single_wav_inference(
                 cname = dataset.index_to_class.get(c_idx, f"id{c_idx}")
                 class_entries.append(f"{cname}:{c_prob:.2f}")
             class_str = " ".join(class_entries)
-            print(f"{idx:<4} {p_obj:8.3f} | {x:8.2f} {y:8.2f} {z:8.2f} | {class_str}")
+            print(f"{idx:<4} | {x:8.2f} {y:8.2f} {z:8.2f} | {class_str}")
         print("-" * 70)
         print("Done.")
 
@@ -475,7 +459,6 @@ if DO_SINGLE_SAMPLE_TEST:
     run_single_wav_inference(
         wav_path=SINGLE_WAV_PATH,
         checkpoint_path=EXPLICIT_WEIGHTS_PATH,
-        objectness_threshold=OBJECTNESS_THRESHOLD,
         top_k_classes=TOP_K_CLASSES,
     )
     print("======================================================\n")
@@ -486,7 +469,7 @@ def test(epoch):
     # Implemented similarly to validate(), but you can load a specific checkpoint first if needed.
     # load_checkpoint_into_model(net, "<PATH_TO_CKPT>.pt", device)
     net.eval()
-    running_loss = {"total": 0.0, "loc": 0.0, "cls": 0.0, "obj": 0.0, "batches": 0}
+    running_loss = {"total": 0.0, "loc": 0.0, "cls": 0.0, "batches": 0}
     metric_accum = {
         "loc_err": 0.0,
         "cls_exact": 0.0,
@@ -500,7 +483,7 @@ def test(epoch):
             outputs = net(specs)
             targets = build_target_list(loc_lists, cls_lists)
             losses = criterion(outputs, targets)
-            for k in ("total", "loc", "cls", "obj"):
+            for k in ("total", "loc", "cls"):
                 running_loss[k] += float(losses[k])
             running_loss["batches"] += 1
             batch_metrics = compute_batch_metrics(outputs, targets, criterion, 0.3)
@@ -510,12 +493,12 @@ def test(epoch):
                     metric_accum[mk] += batch_metrics[mk] * mp
                 metric_accum["matched_pairs"] += mp
             metric_accum["batches"] += 1
-    for k in ("total", "loc", "cls", "obj"):
+    for k in ("total", "loc", "cls"):
         running_loss[k] /= max(running_loss["batches"], 1)
     if metric_accum["matched_pairs"] > 0:
         for mk in ("loc_err", "cls_exact", "cls_elem_acc"):
             metric_accum[mk] /= metric_accum["matched_pairs"]
     print(
-        f"[TEST] Epoch {epoch} | Total {running_loss['total']:.4f} | Loc {running_loss['loc']:.4f} | Cls {running_loss['cls']:.4f} | Obj {running_loss['obj']:.4f} | loc_err {metric_accum['loc_err']:.3f} | ClsExact {metric_accum['cls_exact']:.3f} | ClsElem {metric_accum['cls_elem_acc']:.3f}"
+        f"[TEST] Epoch {epoch} | Total {running_loss['total']:.4f} | Loc {running_loss['loc']:.4f} | Cls {running_loss['cls']:.4f} | loc_err {metric_accum['loc_err']:.3f} | ClsExact {metric_accum['cls_exact']:.3f} | ClsElem {metric_accum['cls_elem_acc']:.3f}"
     )
     return {**running_loss, **metric_accum}

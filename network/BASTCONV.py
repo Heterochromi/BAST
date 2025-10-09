@@ -304,7 +304,7 @@ class BAST_CONV(nn.Module):
             # nn.Linear(mlp_dim, self.num_coordinates_output + 1 + self.num_classes_cls),
         )
         self.loc_head = nn.Linear(mlp_dim, self.num_coordinates_output)
-        self.obj_head = nn.Linear(mlp_dim, 1)
+
         self.cls_head = nn.Linear(mlp_dim, self.num_classes_cls)
 
     def forward(self, img):
@@ -351,7 +351,7 @@ class BAST_CONV(nn.Module):
         shared_features = self.shared_head(queries)
 
         loc_out = torch.tanh(self.loc_head(shared_features))
-        obj_logit = self.obj_head(shared_features).squeeze(-1)
+
         cls_logit = self.cls_head(shared_features)
 
-        return loc_out, obj_logit, cls_logit
+        return loc_out, cls_logit

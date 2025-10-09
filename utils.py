@@ -12,7 +12,7 @@ def build_target_list(loc_lists, cls_lists):
 
 
 def compute_batch_metrics(
-    outputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    outputs: tuple[torch.Tensor, torch.Tensor],
     targets: list[dict[str, torch.Tensor]],
     criterion: "SetCriterionBAST",
     cls_threshold: float,
@@ -23,7 +23,7 @@ def compute_batch_metrics(
       - exact match accuracy (all class bits correct) over matched pairs
       - element-wise accuracy over matched pairs
     """
-    loc_out, obj_logit, cls_logit = outputs
+    loc_out, cls_logit = outputs
     B = int(loc_out.shape[0])
     loc_err_sum = 0.0
     matched_pairs = 0
@@ -38,10 +38,10 @@ def compute_batch_metrics(
             if N == 0:
                 continue
             pred_loc_b = loc_out[b]
-            pred_obj_b = obj_logit[b]
+
             pred_cls_b = cls_logit[b]
             pred_idx, gt_idx = criterion._hungarian(
-                pred_loc_b, pred_obj_b, pred_cls_b, gt_loc, gt_cls
+                pred_loc_b, pred_cls_b, gt_loc, gt_cls
             )
             if pred_idx.numel() == 0:
                 continue
@@ -66,7 +66,6 @@ def compute_batch_metrics(
         "matched_pairs": matched_pairs,
     }
     return metrics
-
 
 
 def find_latest_checkpoint(directory: str, pattern: str = "*.pt") -> str | None:
