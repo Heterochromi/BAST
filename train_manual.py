@@ -17,11 +17,11 @@ from torch.optim.lr_scheduler import CyclicLR
 CSV_PATH = "tensor_metadata.csv"
 SPECTROGRAM_SIZE = [64, 19]  # [Freq (n_mels), Time frames]
 NUM_OUTPUT = 3  # e.g., (x, y, z)
-EMBEDDING_DIM = 256
-TRANSFORMER_ENCODER_DEPTH = 4
-TRANSFORMER_DECODER_DEPTH = 2
-TRANSFORMER_HEADS = 8
-TRANSFORMER_MLP_RATIO = 2
+EMBEDDING_DIM = 512
+TRANSFORMER_ENCODER_DEPTH = 6
+TRANSFORMER_DECODER_DEPTH = 3
+TRANSFORMER_HEADS = 4
+TRANSFORMER_MLP_RATIO = 4
 DROPOUT = 0.1
 EMB_DROPOUT = 0.1
 
@@ -31,19 +31,19 @@ MAX_SOURCES = 4
 LOSS_TYPE = "MIX"
 
 # Hungarian matching and loss weights
-CLS_COST_WEIGHT_HUNGARIAN = 0.5
-LOC_COST_WEIGHT_HUNGARIAN = 0.5
-OBJ_COST_WEIGHT_HUNGARIAN = 0.5
-LOC_WEIGHT = 0.3
-CLS_WEIGHT = 7.0
+CLS_COST_WEIGHT_HUNGARIAN = 1
+LOC_COST_WEIGHT_HUNGARIAN = 1
+OBJ_COST_WEIGHT_HUNGARIAN = 1
+LOC_WEIGHT = 0.1
+CLS_WEIGHT = 0.5
 OBJ_WEIGHT = 1.0
 
 # Optimization / training
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-4
 EPOCHS = 60
-BATCH_SIZE = 32
-TEST_SPLIT = 0.8
+BATCH_SIZE = 1200
+TEST_SPLIT = 0.7
 VAL_SPLIT = 0.5
 SEED = 42
 NUM_WORKERS = 4
@@ -60,10 +60,10 @@ TOKEN_KERNEL_SIZE = 3
 TOKEN_STRIDE = 1
 TOKEN_PADDING = 1
 POOL_KERNEL_SIZE = 2
-POOL_STRIDE = 1
+POOL_STRIDE = 2
 POOL_PADDING = 0
-N_CONV_LAYERS = 3
-IN_PLANES = 128
+N_CONV_LAYERS = 4
+IN_PLANES = 256
 CONV_BIAS = True
 # %%
 # Data setup
@@ -160,6 +160,16 @@ def build_model_manual():
 
 
 def build_criterion_manual():
+    # Expose optional hyperparameters via globals with sensible defaults
+    cls_focal_alpha = None
+    cls_focal_gamma = 2.0
+    cls_pos_weight = 6
+
+    obj_use_focal = True
+    obj_focal_alpha = None
+    obj_focal_gamma = 2.0
+    obj_pos_weight = 2
+
     criterion = SetCriterionBAST(
         loc_criterion=get_localization_criterion(LOSS_TYPE),
         num_classes=num_classes,
@@ -170,6 +180,14 @@ def build_criterion_manual():
         loc_cost_weight=LOC_COST_WEIGHT_HUNGARIAN,
         obj_cost_weight=OBJ_COST_WEIGHT_HUNGARIAN,
         max_sources=MAX_SOURCES,
+        # New exposed hyperparameters
+        cls_focal_alpha=cls_focal_alpha,
+        cls_focal_gamma=cls_focal_gamma,
+        cls_pos_weight=cls_pos_weight,
+        obj_use_focal=obj_use_focal,
+        obj_focal_alpha=obj_focal_alpha,
+        obj_focal_gamma=obj_focal_gamma,
+        obj_pos_weight=obj_pos_weight,
     )
     return criterion
 
@@ -241,8 +259,8 @@ step_size_up = steps_per_cycle // 2
 
 scheduler = CyclicLR(
     optimizer,
-    base_lr=1e-5,
-    max_lr=1e-2,
+    base_lr=2e-5,
+    max_lr=1e-3,
     step_size_up=step_size_up,
     # mode="triangular2",
     cycle_momentum=False,
@@ -276,7 +294,7 @@ for epoch in range(1, EPOCHS + 1):
         scheduler.step()
 
         # Accumulate losses
-        epoch_losses["total"] += float(loss_dict["total"])
+        epoch_losses["total"] += loss_dict["total"].detach().item()
         epoch_losses["loc"] += float(loss_dict["loc"])
         epoch_losses["cls"] += float(loss_dict["cls"])
         epoch_losses["obj"] += float(loss_dict["obj"])

@@ -296,13 +296,16 @@ class BAST_CONV(nn.Module):
         self.object_queries = nn.Parameter(torch.randn(max_sources, dim))
         self.query_pos_embed = nn.Parameter(torch.randn(max_sources, dim))
 
-        self.det_head = nn.Sequential(
+        self.shared_head = nn.Sequential(
             nn.LayerNorm(dim),
             nn.Linear(dim, mlp_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(mlp_dim, self.num_coordinates_output + 1 + self.num_classes_cls),
+            # nn.Linear(mlp_dim, self.num_coordinates_output + 1 + self.num_classes_cls),
         )
+        self.loc_head = nn.Linear(mlp_dim, self.num_coordinates_output)
+        self.obj_head = nn.Linear(mlp_dim, 1)
+        self.cls_head = nn.Linear(mlp_dim, self.num_classes_cls)
 
     def forward(self, img):
         # Input: [B, 2, H, W] (stereo spectrogram)
@@ -345,11 +348,10 @@ class BAST_CONV(nn.Module):
             queries = decoder_layer(queries, x)
 
         # Predict from each query slot
-        predictions = self.det_head(queries)  # [B, max_sources, loc+obj+cls]
+        shared_features = self.shared_head(queries)
 
-        # Split outputs
-        loc_out = predictions[..., : self.num_coordinates_output]
-        obj_logit = predictions[..., self.num_coordinates_output]
-        cls_logit = predictions[..., self.num_coordinates_output + 1 :]
+        loc_out = torch.tanh(self.loc_head(shared_features))
+        obj_logit = self.obj_head(shared_features).squeeze(-1)
+        cls_logit = self.cls_head(shared_features)
 
         return loc_out, obj_logit, cls_logit

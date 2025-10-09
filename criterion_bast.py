@@ -8,8 +8,8 @@ class AngularLossWithCartesianCoordinate(nn.Module):
         super(AngularLossWithCartesianCoordinate, self).__init__()
 
     def forward(self, x, y):
-        x = x / torch.linalg.norm(x, dim=1)[:, None]
-        y = y / torch.linalg.norm(y, dim=1)[:, None]
+        x = x / torch.linalg.norm(x, dim=1, keepdim=True).clamp_min(1e-8)
+        y = y / torch.linalg.norm(y, dim=1, keepdim=True).clamp_min(1e-8)
         dot = torch.clamp(torch.sum(x * y, dim=1), min=-0.999, max=0.999)
         loss = torch.mean(torch.acos(dot))
         return loss
@@ -22,8 +22,8 @@ class MixWithCartesianCoordinate(nn.Module):
 
     def forward(self, x, y):
         loss1 = self.mse(x, y)
-        x = x / torch.linalg.norm(x, dim=1)[:, None]
-        y = y / torch.linalg.norm(y, dim=1)[:, None]
+        x = x / torch.linalg.norm(x, dim=1, keepdim=True).clamp_min(1e-8)
+        y = y / torch.linalg.norm(y, dim=1, keepdim=True).clamp_min(1e-8)
         dot = torch.clamp(torch.sum(x * y, dim=1), min=-0.999, max=0.999)
         loss2 = torch.mean(torch.acos(dot))
         return loss1 + loss2
@@ -31,12 +31,23 @@ class MixWithCartesianCoordinate(nn.Module):
 
 
 
-def focal_bce_with_logits(logits, targets, alpha=0.25, gamma=2.0, reduction="mean"):
+def focal_bce_with_logits(logits, targets, alpha=0.25, gamma=2.0, reduction="mean", pos_weight=None):
     """
-    Optional focal loss for multi-label classification.
+    Optional focal loss for multi-label classification/objectness with optional pos_weight.
+    pos_weight can be:
+      - None
+      - float/int (applied uniformly)
+      - Tensor (will be broadcast by PyTorch)
     """
     p = torch.sigmoid(logits)
-    ce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    # Handle pos_weight types
+    pw = None
+    if pos_weight is not None:
+        if isinstance(pos_weight, (float, int)):
+            pw = torch.tensor(pos_weight, device=logits.device, dtype=logits.dtype)
+        else:
+            pw = pos_weight
+    ce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none", pos_weight=pw)
     p_t = p * targets + (1 - p) * (1 - targets)
     focal = ce * ((1 - p_t) ** gamma)
     if alpha is not None:
@@ -54,8 +65,8 @@ class SetCriterionBAST(nn.Module):
     Combines:
       - Hungarian matching
       - Localization loss (your chosen criterion)
-      - Classification BCE (per matched slot)
-      - Objectness BCE (matched=1, unmatched=0)
+      - Classification focal BCE (per matched slot)
+      - Objectness BCE or focal BCE (matched=1, unmatched=0)
     """
 
     def __init__(
@@ -69,6 +80,13 @@ class SetCriterionBAST(nn.Module):
         loc_cost_weight=1.0,
         obj_cost_weight=0.1,
         max_sources=4,
+        cls_focal_alpha=0.25,
+        cls_focal_gamma=2.0,
+        cls_pos_weight=None,
+        obj_use_focal=False,
+        obj_focal_alpha=0.25,
+        obj_focal_gamma=2.0,
+        obj_pos_weight=None,
     ):
         super().__init__()
         self.loc_criterion = loc_criterion
@@ -81,55 +99,81 @@ class SetCriterionBAST(nn.Module):
         self.loc_cost_weight = loc_cost_weight
         self.obj_cost_weight = obj_cost_weight
         self.max_sources = max_sources
+        # Focal loss parameters for classification (used for both matching and loss)
+        self.cls_focal_alpha = cls_focal_alpha
+        self.cls_focal_gamma = cls_focal_gamma
+        self.cls_pos_weight = cls_pos_weight
+        # Objectness loss options
+        self.obj_use_focal = obj_use_focal
+        self.obj_focal_alpha = obj_focal_alpha
+        self.obj_focal_gamma = obj_focal_gamma
+        self.obj_pos_weight = obj_pos_weight
 
     @staticmethod
     def _pairwise_loc_cost(pred_loc, gt_loc):
         if gt_loc.numel() == 0:
             return torch.zeros(pred_loc.size(0), 0, device=pred_loc.device)
-        # pred_loc, gt_loc: [K,2] / [N,2] (az_deg 0..360, el_deg -90..90)
-        pred = pred_loc[:, None, :]  # [K,1,2]
-        tgt = gt_loc[None, :, :]  # [1,N,2]
-        # Convert to radians
-        az_p = pred[..., 0] * (torch.pi / 180)
-        el_p = pred[..., 1] * (torch.pi / 180)
-        az_t = tgt[..., 0] * (torch.pi / 180)
-        el_t = tgt[..., 1] * (torch.pi / 180)
+        # Supports 2D azimuth/elevation in degrees or 3D Cartesian unit vectors.
+        # Shapes: pred_loc [K,D], gt_loc [N,D], where D in {2,3}
+        pred = pred_loc[:, None, :]  # [K,1,D]
+        tgt = gt_loc[None, :, :]     # [1,N,D]
 
-        # 3D vectors
-        def to_vec(az, el):
-            x = torch.cos(el) * torch.cos(az)
-            y = torch.cos(el) * torch.sin(az)
-            z = torch.sin(el)
-            return torch.stack([x, y, z], dim=-1)
+        D = pred.size(-1)
+        if D == 3:
+            # Assume already Cartesian. Normalize to unit vectors.
+            vp = pred / pred.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+            vt = tgt / tgt.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        elif D == 2:
+            # Assume azimuth (0..360 deg), elevation (-90..90 deg)
+            az_p = pred[..., 0] * (torch.pi / 180)
+            el_p = pred[..., 1] * (torch.pi / 180)
+            az_t = tgt[..., 0] * (torch.pi / 180)
+            el_t = tgt[..., 1] * (torch.pi / 180)
 
-        vp = to_vec(az_p, el_p)
-        vt = to_vec(az_t, el_t)
-        vp = vp / vp.norm(dim=-1, keepdim=True)
-        vt = vt / vt.norm(dim=-1, keepdim=True)
+            def to_vec(az, el):
+                x = torch.cos(el) * torch.cos(az)
+                y = torch.cos(el) * torch.sin(az)
+                z = torch.sin(el)
+                return torch.stack([x, y, z], dim=-1)
+
+            vp = to_vec(az_p, el_p)
+            vt = to_vec(az_t, el_t)
+            vp = vp / vp.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+            vt = vt / vt.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        else:
+            raise ValueError(f"Unsupported loc dimension: {D}; expected 2 or 3.")
+
         cos_sim = (vp * vt).sum(dim=-1).clamp(-1 + 1e-6, 1 - 1e-6)  # [K,N]
-        # Angular distance in radians -> convert to degrees (optional) or keep radians
+        # Angular distance in radians, normalized to [0,1] by dividing by pi
         ang = torch.acos(cos_sim)  # radians
-        return ang  # lower = better
+        return ang / torch.pi  # lower = better
 
-    @staticmethod
-    def _pairwise_cls_cost(pred_cls_logit, gt_cls_onehot, pos_weight=7.0):
+    def _pairwise_cls_cost(self, pred_cls_logit, gt_cls_onehot):
         """
         pred_cls_logit: [K,C]
-        gt_cls_onehot: [N,C] (usually one 1 per row)
-        Returns classification cost matrix [K,N] using summed BCE per gt source.
+        gt_cls_onehot: [N,C] (multi-label one-hot)
+        Returns classification cost matrix [K,N] using summed focal BCE per gt source.
+        Lower is better.
         """
         if gt_cls_onehot.numel() == 0:
             return torch.zeros(pred_cls_logit.size(0), 0, device=pred_cls_logit.device)
-        p = torch.sigmoid(pred_cls_logit)  # [K,C]
-        p = torch.clamp(p, 1e-6, 1 - 1e-6)
-        # BCE per class: -(y*log p + (1-y)*log (1-p))
-        # Expand dims to broadcast: [K,1,C] vs [1,N,C]
-        p_exp = p[:, None, :]
-        y_exp = gt_cls_onehot[None, :, :]
-        pos_term = -(y_exp * torch.log(p_exp))
-        neg_term = -((1 - y_exp) * torch.log(1 - p_exp))
-        cost = pos_weight * pos_term + neg_term
-        return cost.sum(-1)
+        # Broadcast logits/targets to [K,N,C]
+        logits = pred_cls_logit[:, None, :].expand(-1, gt_cls_onehot.size(0), -1)
+        targets = gt_cls_onehot[None, :, :].expand(pred_cls_logit.size(0), -1, -1)
+        # Focal BCE without reduction to get per (K,N,C)
+        focal = focal_bce_with_logits(
+            logits,
+            targets,
+            alpha=self.cls_focal_alpha,
+            gamma=self.cls_focal_gamma,
+            reduction="none",
+            pos_weight=self.cls_pos_weight,
+        )
+        # Use positives-only classification cost, averaged per (K,N)
+        pos_mask = (targets > 0)
+        pos_count = pos_mask.sum(dim=-1).clamp_min(1)
+        cost = (focal * pos_mask).sum(dim=-1) / pos_count
+        return cost
 
     def _hungarian(self, pred_loc, pred_obj_logit, pred_cls_logit, gt_loc, gt_cls):
         """
@@ -167,9 +211,10 @@ class SetCriterionBAST(nn.Module):
     def forward(self, outputs, targets):
         """
         outputs: (loc_out, obj_logit, cls_logit)
-          loc_out: [B,K,2], obj_logit: [B,K], cls_logit: [B,K,C]
+          loc_out: [B,K,D], obj_logit: [B,K], cls_logit: [B,K,C]
         targets: list of dicts length B, each:
-          {'loc': [N_i,2], 'cls': [N_i,C]}
+          {'loc': [N_i,D], 'cls': [N_i,C]}
+        D can be 2 (az, el in deg) or 3 (Cartesian unit vectors).
         """
         loc_out, obj_logit, cls_logit = outputs
         B, K = loc_out.shape[0], loc_out.shape[1]
@@ -205,24 +250,57 @@ class SetCriterionBAST(nn.Module):
                 cls_loss_b = focal_bce_with_logits(
                     pred_cls_b[pred_idx],
                     gt_cls[gt_idx],
-                    alpha=0.25,
-                    gamma=2.0,
+                    alpha=self.cls_focal_alpha,
+                    gamma=self.cls_focal_gamma,
                     reduction="mean",
+                    pos_weight=self.cls_pos_weight,
                 )
 
                 # Objectness:
                 obj_target = torch.zeros_like(pred_obj_b)
                 obj_target[pred_idx] = 1.0
-                obj_loss_b = F.binary_cross_entropy_with_logits(
-                    pred_obj_b, obj_target, reduction="mean"
-                )
+                if self.obj_use_focal:
+                    obj_loss_b = focal_bce_with_logits(
+                        pred_obj_b,
+                        obj_target,
+                        alpha=self.obj_focal_alpha,
+                        gamma=self.obj_focal_gamma,
+                        reduction="mean",
+                        pos_weight=self.obj_pos_weight,
+                    )
+                else:
+                    pw = None
+                    if self.obj_pos_weight is not None:
+                        if isinstance(self.obj_pos_weight, (float, int)):
+                            pw = torch.tensor(self.obj_pos_weight, device=pred_obj_b.device, dtype=pred_obj_b.dtype)
+                        else:
+                            pw = self.obj_pos_weight
+                    obj_loss_b = F.binary_cross_entropy_with_logits(
+                        pred_obj_b, obj_target, reduction="mean", pos_weight=pw
+                    )
             else:
                 # No sources: all objectness targets = 0
                 loc_loss_b = torch.tensor(0.0, device=loc_out.device)
                 cls_loss_b = torch.tensor(0.0, device=loc_out.device)
-                obj_loss_b = F.binary_cross_entropy_with_logits(
-                    obj_logit[b], torch.zeros_like(obj_logit[b]), reduction="mean"
-                )
+                if self.obj_use_focal:
+                    obj_loss_b = focal_bce_with_logits(
+                        obj_logit[b],
+                        torch.zeros_like(obj_logit[b]),
+                        alpha=self.obj_focal_alpha,
+                        gamma=self.obj_focal_gamma,
+                        reduction="mean",
+                        pos_weight=self.obj_pos_weight,
+                    )
+                else:
+                    pw = None
+                    if self.obj_pos_weight is not None:
+                        if isinstance(self.obj_pos_weight, (float, int)):
+                            pw = torch.tensor(self.obj_pos_weight, device=obj_logit[b].device, dtype=obj_logit[b].dtype)
+                        else:
+                            pw = self.obj_pos_weight
+                    obj_loss_b = F.binary_cross_entropy_with_logits(
+                        obj_logit[b], torch.zeros_like(obj_logit[b]), reduction="mean", pos_weight=pw
+                    )
 
             total_loc += loc_loss_b
             total_cls += cls_loss_b
