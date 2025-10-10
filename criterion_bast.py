@@ -163,7 +163,6 @@ class SetCriterionBAST(nn.Module):
         loc_weight: float = 1.0,
         cls_weight: float = 1.0,
         cls_cost_weight: float = 0.25,
-        cls_neg_cost_weight: float = 0.5,
         loc_cost_weight: float = 1.0,
         max_sources: int = 4,
         cls_focal_alpha: float | None = 0.25,
@@ -179,7 +178,6 @@ class SetCriterionBAST(nn.Module):
 
         # Matching cost weights
         self.cls_cost_weight = cls_cost_weight
-        self.cls_neg_cost_weight = cls_neg_cost_weight
         self.loc_cost_weight = loc_cost_weight
         self.max_sources = max_sources
 
@@ -262,11 +260,19 @@ class SetCriterionBAST(nn.Module):
 
         pos_mask = targets > 0
         neg_mask = ~pos_mask
+
+        num_pos = pos_mask.sum().float()
+        num_neg = neg_mask.sum().float()
+
+        pos_weight_auto = 1.0
+        neg_weight_auto = num_pos / (num_neg + 1e-8)
+
         pos_count = pos_mask.sum(dim=-1).clamp_min(1)
         neg_count = neg_mask.sum(dim=-1).clamp_min(1)
+
         pos_cost = (focal * pos_mask).sum(dim=-1) / pos_count  # [K,N]
         neg_cost = (focal * neg_mask).sum(dim=-1) / neg_count
-        cost = pos_cost + neg_cost * self.cls_neg_cost_weight
+        cost = pos_weight_auto * pos_cost + neg_weight_auto * neg_cost
         return cost
 
     def _hungarian(self, pred_loc, pred_cls_logit, gt_loc, gt_cls):
@@ -285,8 +291,11 @@ class SetCriterionBAST(nn.Module):
             loc_cost = self._pairwise_loc_cost(pred_loc, gt_loc)  # [K,N]
             cls_cost = self._pairwise_cls_cost(pred_cls_logit, gt_cls)  # [K,N]
 
+            loc_cost_norm = (loc_cost - loc_cost.mean()) / (loc_cost.std() + 1e-8)
+            cls_cost_norm = (cls_cost - cls_cost.mean()) / (cls_cost.std() + 1e-8)
+
             total_cost = (
-                self.loc_cost_weight * loc_cost + self.cls_cost_weight * cls_cost
+                self.loc_cost_weight * loc_cost_norm + self.cls_cost_weight * cls_cost_norm
             )
 
             cost_np = total_cost.detach().cpu().numpy()

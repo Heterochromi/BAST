@@ -37,7 +37,6 @@ LOSS_TYPE = "MIX"
 
 # Hungarian matching and loss weights
 CLS_COST_WEIGHT_HUNGARIAN = 1
-CLS_NEG_COST_WEIGHT_HUNGARIAN = 0.16
 LOC_COST_WEIGHT_HUNGARIAN = 1
 # LOC_WEIGHT = 0.1
 # CLS_WEIGHT = 0.5
@@ -182,7 +181,6 @@ def build_criterion_manual():
         num_classes=num_classes,
         # Hungarian matching weights
         cls_cost_weight=CLS_COST_WEIGHT_HUNGARIAN,
-        cls_neg_cost_weight=CLS_NEG_COST_WEIGHT_HUNGARIAN,
         loc_cost_weight=LOC_COST_WEIGHT_HUNGARIAN,
         max_sources=MAX_SOURCES,
         # Exposed hyperparameters for classification focal loss
