@@ -203,7 +203,7 @@ class BAST_CONV(nn.Module):
         heads,  # number of attention heads, e.g., 8
         num_encoder_layers=6,
         num_decoder_layers=3,
-        mlp_ratio=4,
+        mlp_ratio=2,
         dropout=0.2,
         emb_dropout=0.0,
         binaural_integration="CROSS_ATTN",

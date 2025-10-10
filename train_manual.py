@@ -8,7 +8,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 from datetime import datetime
 from utils import *
-from criterion_bast import SetCriterionBAST, get_localization_criterion
+from criterion_bast import SetCriterionBAST, get_localization_criterion, UncertaintyWeighter
 from torch.optim.lr_scheduler import CyclicLR
 
 
@@ -21,7 +21,7 @@ EMBEDDING_DIM = 512
 TRANSFORMER_ENCODER_DEPTH = 6
 TRANSFORMER_DECODER_DEPTH = 3
 TRANSFORMER_HEADS = 4
-TRANSFORMER_MLP_RATIO = 4
+TRANSFORMER_MLP_RATIO = 2
 DROPOUT = 0.1
 EMB_DROPOUT = 0.1
 
@@ -32,9 +32,10 @@ LOSS_TYPE = "MIX"
 
 # Hungarian matching and loss weights
 CLS_COST_WEIGHT_HUNGARIAN = 1
+CLS_NEG_COST_WEIGHT_HUNGARIAN = 0.16
 LOC_COST_WEIGHT_HUNGARIAN = 1
-LOC_WEIGHT = 0.1
-CLS_WEIGHT = 0.5
+# LOC_WEIGHT = 0.1
+# CLS_WEIGHT = 0.5
 
 # Optimization / training
 LEARNING_RATE = 1e-4
@@ -158,32 +159,39 @@ def build_model_manual():
 
 
 def build_criterion_manual():
-    # Expose optional hyperparameters via globals with sensible defaults
     cls_focal_alpha = None
     cls_focal_gamma = 2.0
     cls_pos_weight = 6
 
-    # Objectness removed
+    # Task weighter (uncertainty weighting for loc/cls losses)
+    weighter = UncertaintyWeighter(init_log_vars={"loc": 0.0, "cls": 0.0})
+
 
     criterion = SetCriterionBAST(
         loc_criterion=get_localization_criterion(LOSS_TYPE),
         num_classes=num_classes,
-        loc_weight=LOC_WEIGHT,
-        cls_weight=CLS_WEIGHT,
+        # Hungarian matching weights
         cls_cost_weight=CLS_COST_WEIGHT_HUNGARIAN,
+        cls_neg_cost_weight=CLS_NEG_COST_WEIGHT_HUNGARIAN,
         loc_cost_weight=LOC_COST_WEIGHT_HUNGARIAN,
         max_sources=MAX_SOURCES,
         # Exposed hyperparameters for classification focal loss
         cls_focal_alpha=cls_focal_alpha,
         cls_focal_gamma=cls_focal_gamma,
         cls_pos_weight=cls_pos_weight,
+        # Learned task weighting for final loss
+        task_weighter=weighter,
     )
     return criterion
 
 
 def build_optimizer_manual(net):
+    # Include criterion params (e.g., UncertaintyWeighter) in optimizer if available
+    params = list(net.parameters())
+    if "criterion" in globals() and isinstance(globals()["criterion"], nn.Module):
+        params += list(globals()["criterion"].parameters())
     optimizer = torch.optim.AdamW(
-        net.parameters(),
+        params,
         lr=LEARNING_RATE,
         weight_decay=WEIGHT_DECAY,
     )
@@ -235,6 +243,7 @@ def validate(net, epoch, criterion, device):
 best_val = float("inf")
 net, device = build_model_manual()
 criterion = build_criterion_manual()
+criterion = criterion.to(device)
 optimizer = build_optimizer_manual(net)
 
 # %%
@@ -243,7 +252,7 @@ batches_per_epoch = len(train_loader)
 total_epochs = 60
 num_cycles = 6
 
-steps_per_cycle = (EPOCHS // 6) * batches_per_epoch
+steps_per_cycle = (EPOCHS // num_cycles) * batches_per_epoch
 step_size_up = steps_per_cycle // 2
 
 scheduler = CyclicLR(

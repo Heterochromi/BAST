@@ -75,6 +75,27 @@ class MixWithCartesianCoordinate(nn.Module):
         loss2 = torch.mean(torch.acos(dot))
         return loss1 + loss2
 
+class UncertaintyWeighter(nn.Module):
+    """
+    Learn per-task weights using homoscedastic uncertainty (Kendall & Gal 2018).
+    Wraps loc/cls losses: total = sum(0.5 * (exp(-s_i) * L_i + s_i))
+    """
+    def __init__(self, init_log_vars: dict[str, float] = None):
+        super().__init__()
+        init_log_vars = init_log_vars or {"loc": 0.0, "cls": 0.0}
+        self.log_vars = nn.ParameterDict({
+            name: nn.Parameter(torch.tensor(val, dtype=torch.float32))
+            for name, val in init_log_vars.items()
+        })
+
+    def forward(self, loss_dict: dict[str, torch.Tensor]) -> torch.Tensor:
+        # Expects keys "loc" and "cls" in loss_dict
+        total = 0.0
+        for name in ("loc", "cls"):
+            L = loss_dict[name]
+            s = self.log_vars[name]
+            total += 0.5 * (torch.exp(-s) * L + s)
+        return total
 
 def focal_bce_with_logits(
     logits: torch.Tensor,
@@ -142,11 +163,13 @@ class SetCriterionBAST(nn.Module):
         loc_weight: float = 1.0,
         cls_weight: float = 1.0,
         cls_cost_weight: float = 0.25,
+        cls_neg_cost_weight: float = 0.5,
         loc_cost_weight: float = 1.0,
         max_sources: int = 4,
         cls_focal_alpha: float | None = 0.25,
         cls_focal_gamma: float = 2.0,
         cls_pos_weight=None,
+        task_weighter: nn.Module | None = None,
     ):
         super().__init__()
         self.loc_criterion = loc_criterion
@@ -156,6 +179,7 @@ class SetCriterionBAST(nn.Module):
 
         # Matching cost weights
         self.cls_cost_weight = cls_cost_weight
+        self.cls_neg_cost_weight = cls_neg_cost_weight
         self.loc_cost_weight = loc_cost_weight
         self.max_sources = max_sources
 
@@ -163,6 +187,7 @@ class SetCriterionBAST(nn.Module):
         self.cls_focal_alpha = cls_focal_alpha
         self.cls_focal_gamma = cls_focal_gamma
         self.cls_pos_weight = cls_pos_weight
+        self.task_weighter = task_weighter
 
     @staticmethod
     def _pairwise_loc_cost(
@@ -236,8 +261,12 @@ class SetCriterionBAST(nn.Module):
         )  # [K,N,C]
 
         pos_mask = targets > 0
+        neg_mask = ~pos_mask
         pos_count = pos_mask.sum(dim=-1).clamp_min(1)
-        cost = (focal * pos_mask).sum(dim=-1) / pos_count  # [K,N]
+        neg_count = neg_mask.sum(dim=-1).clamp_min(1)
+        pos_cost = (focal * pos_mask).sum(dim=-1) / pos_count  # [K,N]
+        neg_cost = (focal * neg_mask).sum(dim=-1) / neg_count
+        cost = pos_cost + neg_cost * self.cls_neg_cost_weight
         return cost
 
     def _hungarian(self, pred_loc, pred_cls_logit, gt_loc, gt_cls):
@@ -325,7 +354,10 @@ class SetCriterionBAST(nn.Module):
         loc_loss = total_loc / denom
         cls_loss = total_cls / denom
 
-        total = self.loc_weight * loc_loss + self.cls_weight * cls_loss
+        if getattr(self, "task_weighter", None) is not None and samples_with_sources > 0:
+            total = self.task_weighter({"loc": loc_loss, "cls": cls_loss})
+        else:
+            total = self.loc_weight * loc_loss + self.cls_weight * cls_loss
 
         return {
             "total": total,
