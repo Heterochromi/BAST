@@ -1,5 +1,6 @@
 # %%
 from network.BASTCONV import BAST_CONV
+from network.BAST import BAST_Variant
 from data_loading import MultiSourceSpectrogramDataset, multisource_collate
 import os
 import numpy as np
@@ -8,7 +9,11 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 from datetime import datetime
 from utils import *
-from criterion_bast import SetCriterionBAST, get_localization_criterion, UncertaintyWeighter
+from criterion_bast import (
+    SetCriterionBAST,
+    get_localization_criterion,
+    UncertaintyWeighter,
+)
 from torch.optim.lr_scheduler import CyclicLR
 
 
@@ -41,7 +46,7 @@ LOC_COST_WEIGHT_HUNGARIAN = 1
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-4
 EPOCHS = 60
-BATCH_SIZE = 1800
+BATCH_SIZE = 600
 TEST_SPLIT = 0.7
 VAL_SPLIT = 0.5
 SEED = 42
@@ -55,12 +60,16 @@ MODEL_NAME = "BASTCONV_MANUAL"
 
 # Tokenizer / conv front-end for BAST_CONV
 N_CONV_INPUT_CHANNELS = 1
-TOKEN_KERNEL_SIZE = 3
-TOKEN_STRIDE = 1
+
+TOKEN_KERNEL_SIZE = 2
+POOL_KERNEL_SIZE = 1
+
+TOKEN_STRIDE = 2
+POOL_STRIDE = 1
+
 TOKEN_PADDING = 1
-POOL_KERNEL_SIZE = 2
-POOL_STRIDE = 2
 POOL_PADDING = 0
+
 N_CONV_LAYERS = 4
 IN_PLANES = 256
 CONV_BIAS = True
@@ -121,8 +130,10 @@ print(f"Train: {len(train_ds)} | Val: {len(val_ds)} | Test: {len(test_ds)}")
 # %%
 # Build model, criterion, optimizer (manual params, no HPO)
 def build_model_manual():
-    net = BAST_CONV(
+    net = BAST_Variant(
         image_size=SPECTROGRAM_SIZE,
+        patch_size=4,
+        patch_overlap=0,
         num_coordinates_output=NUM_OUTPUT,
         dim=EMBEDDING_DIM,
         heads=TRANSFORMER_HEADS,
@@ -134,16 +145,16 @@ def build_model_manual():
         binaural_integration=BINAURAL_INTEGRATION,
         max_sources=MAX_SOURCES,
         num_classes_cls=num_classes,
-        n_conv_input_channels=N_CONV_INPUT_CHANNELS,
-        kernel_size=TOKEN_KERNEL_SIZE,
-        stride=TOKEN_STRIDE,
-        padding=TOKEN_PADDING,
-        pooling_kernel_size=POOL_KERNEL_SIZE,
-        pooling_stride=POOL_STRIDE,
-        pooling_padding=POOL_PADDING,
-        n_conv_layers=N_CONV_LAYERS,
-        in_planes=IN_PLANES,
-        conv_bias=CONV_BIAS,
+        # n_conv_input_channels=N_CONV_INPUT_CHANNELS,
+        # kernel_size=TOKEN_KERNEL_SIZE,
+        # stride=TOKEN_STRIDE,
+        # padding=TOKEN_PADDING,
+        # pooling_kernel_size=POOL_KERNEL_SIZE,
+        # pooling_stride=POOL_STRIDE,
+        # pooling_padding=POOL_PADDING,
+        # n_conv_layers=N_CONV_LAYERS,
+        # in_planes=IN_PLANES,
+        # conv_bias=CONV_BIAS,
     )
 
     use_cuda = torch.cuda.is_available()
@@ -165,7 +176,6 @@ def build_criterion_manual():
 
     # Task weighter (uncertainty weighting for loc/cls losses)
     weighter = UncertaintyWeighter(init_log_vars={"loc": 0.0, "cls": 0.0})
-
 
     criterion = SetCriterionBAST(
         loc_criterion=get_localization_criterion(LOSS_TYPE),
