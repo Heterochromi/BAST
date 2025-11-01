@@ -5,7 +5,7 @@ import numpy as np
 
 
 def generate_raw_spectrogram_torch_tensor(
-    input_audio_path, output_path=None, return_tensor=False, max_duration=30.0
+    input_audio_path, output_path=None, return_tensor=False, max_duration=0.1
 ):
     """
     Generate raw/complex spectrogram using STFT.
@@ -77,13 +77,13 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         test_audio_path = sys.argv[1]
     else:
-        test_audio_path = "dataset40and100ms/dataset_parallel_100ms/sample_0025.wav"
+        test_audio_path = "dataset_parallel_100ms/sample_0025.wav"
 
     print("Generating raw/complex spectrogram...")
     try:
         # Process only first 10 seconds to save memory
         complex_spec = generate_raw_spectrogram_torch_tensor(
-            test_audio_path, return_tensor=True, max_duration=10.0
+            test_audio_path, return_tensor=True, max_duration=0.1
         )
     except Exception as e:
         print(f"Error: {e}")
@@ -159,7 +159,7 @@ if __name__ == "__main__":
     # Add a phase color wheel legend
     fig.text(
         0.5,
-        0.02,
+        0.1,
         "Color indicates Phase: Red(0°) → Yellow(60°) → Green(120°) → Cyan(180°) → Blue(240°) → Magenta(300°) → Red(360°)",
         ha="center",
         fontsize=10,

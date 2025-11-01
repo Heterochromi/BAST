@@ -1,4 +1,5 @@
 from mel_spec_tensor import generate_mel_spectrogram_torch_tensor
+from raw_spec import generate_raw_spectrogram_torch_tensor
 import pandas as pd
 import os
 
@@ -8,6 +9,8 @@ def convert_directory_to_tensors(
     dataset_dir="dataset_parallel",
     output_dir="output_tensors",
     output_csv_path="tensor_metadata.csv",
+    useRawSpectrogram=False,
+    max_duration=0.1,
 ):
     """
     Convert audio files from dataset directory to tensors and create metadata CSV.
@@ -43,7 +46,17 @@ def convert_directory_to_tensors(
 
         try:
             # Generate tensor from wav file
-            generate_mel_spectrogram_torch_tensor(input_wav_path, output_tensor_path)
+            if useRawSpectrogram:
+                _ = generate_raw_spectrogram_torch_tensor(
+                    input_wav_path,
+                    output_path=output_tensor_path,
+                    max_duration=max_duration,
+                    return_tensor=False,
+                )
+            else:
+                _ = generate_mel_spectrogram_torch_tensor(
+                    input_wav_path, output_tensor_path, return_tensor=False
+                )
 
             # Add to output data with same format as input but updated file path
             output_data.append(
@@ -78,6 +91,8 @@ if __name__ == "__main__":
     convert_directory_to_tensors(
         csv_path="dataset_parallel/dataset_metadata.csv",
         dataset_dir="dataset_parallel",
-        output_dir="output_tensors",
-        output_csv_path="tensor_metadata.csv",
+        output_dir="output_tensors_complex",
+        output_csv_path="tensor_metadata_complex.csv",
+        useRawSpectrogram=True,
+        max_duration=0.1,
     )

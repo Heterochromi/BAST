@@ -26,10 +26,14 @@ class MultiSourceSpectrogramDataset(Dataset):
         csv_path: str,
         tensor_dir: str = "output_tensors",
         class_map: dict | None = None,
+        preserve_complex: bool = True,
+        split_real_imag: bool = False,
     ):
         super().__init__()
         self.df = pd.read_csv(csv_path)
         self.tensor_dir = tensor_dir
+        self.preserve_complex = preserve_complex
+        self.split_real_imag = split_real_imag
 
         required_columns = ["name_file", "classes", "x", "y", "z", "num_classes"]
         missing = [c for c in required_columns if c not in self.df.columns]
@@ -64,9 +68,21 @@ class MultiSourceSpectrogramDataset(Dataset):
 
     def _load_spec(self, filename: str) -> torch.Tensor:
         path = os.path.join(self.tensor_dir, filename)
-        tensor = torch.load(path).float()
-        if tensor.ndim != 3 or tensor.shape[0] != 2:
-            raise ValueError(f"Expected [2,F,T], got {tuple(tensor.shape)} at {path}")
+        tensor = torch.load(path)
+
+        if self.split_real_imag and torch.is_complex(tensor):
+            # Split complex into real and imaginary channels
+            # Result: [channel, component, freq, time]
+            # component=0 is real, component=1 is imag for each channel
+            tensor = torch.stack([tensor.real, tensor.imag], dim=1)
+            # Name dimensions for clarity
+            # tensor = tensor.refine_names("channel", "component", "freq", "time")
+        # Convert to float32 only if not preserving complex dtype
+        elif not self.preserve_complex and torch.is_complex(tensor):
+            tensor = tensor.float()
+        elif not torch.is_complex(tensor) and self.preserve_complex:
+            # If we expect complex but got float, keep as float (backward compatibility)
+            tensor = tensor.float()
         return tensor
 
     @staticmethod
@@ -141,7 +157,10 @@ def multisource_collate(batch):
 
 if __name__ == "__main__":
     dataset = MultiSourceSpectrogramDataset(
-        "tensor_metadata_100ms.csv", tensor_dir="output_tensors_100ms"
+        "tensor_metadata_complex.csv",
+        tensor_dir="output_tensors_complex",
+        preserve_complex=False,
+        split_real_imag=True,
     )
     print(f"Dataset size: {len(dataset)}")
     print(f"Number of unique classes: {len(dataset.class_to_index)}")
@@ -152,6 +171,11 @@ if __name__ == "__main__":
         spec, loc_targets, cls_targets, num_sources = dataset[i]
         print(f"\nSample {i}:")
         print(f"Spectrogram shape: {spec.shape}")
+        print(f"Spectrogram names: {spec.names if hasattr(spec, 'names') else 'N/A'}")
+        print(f"spec dtype: {spec.dtype}")
+        print(
+            f"spectrogram data point sample: {spec.select('channel', 0)[0][0]} ,{spec.select('channel', 1)[0][0]}"
+        )
         print(f"Num sources: {num_sources}")
         print(f"Locations (x, y, z): {loc_targets}")  # each row: [x, y, z]
         print(f"Class target shape: {cls_targets.shape}")

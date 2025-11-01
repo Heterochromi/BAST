@@ -142,7 +142,6 @@ class BAST_Variant(nn.Module):
         *,
         image_size,  # e.g., (129, 61) - (freq, time)
         patch_size,  # e.g., 16
-        patch_overlap,  # e.g., 10
         num_coordinates_output,  # e.g., 2 (azimuth, elevation) or 3 (x,y,z)
         dim,  # embedding dimension, e.g., 512
         heads,  # number of attention heads, e.g., 8
@@ -168,36 +167,11 @@ class BAST_Variant(nn.Module):
         mlp_dim = int(dim * mlp_ratio)
         image_height, image_width = image_size
         patch_height = patch_width = patch_size
-        if patch_overlap != 0:
-            num_patches_height = (
-                int(
-                    np.ceil(
-                        (image_height - patch_height) / (patch_height - patch_overlap)
-                    )
-                )
-                + 1
-            )
-            num_patches_width = (
-                int(
-                    np.ceil((image_width - patch_width) / (patch_width - patch_overlap))
-                )
-                + 1
-            )
-            padding_height = (
-                (num_patches_height - 1) * (patch_height - patch_overlap)
-                + patch_height
-                - image_height
-            )
-            padding_width = (
-                (num_patches_width - 1) * (patch_width - patch_overlap)
-                + patch_width
-                - image_width
-            )
-        else:
-            num_patches_height = int(np.ceil(image_height / patch_height))
-            num_patches_width = int(np.ceil(image_width / patch_width))
-            padding_height = num_patches_height * patch_height - image_height
-            padding_width = num_patches_width * patch_width - image_width
+
+        num_patches_height = int(np.ceil(image_height / patch_height))
+        num_patches_width = int(np.ceil(image_width / patch_width))
+        padding_height = num_patches_height * patch_height - image_height
+        padding_width = num_patches_width * patch_width - image_width
 
         self.num_patches_height = num_patches_height
         self.num_patches_width = num_patches_width
@@ -209,7 +183,7 @@ class BAST_Variant(nn.Module):
             nn.ReflectionPad2d((0, padding_width, padding_height, 0)),
             nn.Unfold(
                 kernel_size=(patch_size, patch_size),
-                stride=patch_height - patch_overlap,
+                stride=patch_height,
             ),
             Rearrange(
                 "b (c k1 k2) n -> b n (k1 k2 c)",
@@ -242,6 +216,12 @@ class BAST_Variant(nn.Module):
             dim, heads, dropout=dropout, batch_first=True
         )
         self.norm_cross = nn.LayerNorm(dim)
+
+        # Create diagonal attention mask for patch-to-patch correspondence
+        # Each patch should only attend to its corresponding patch
+        attn_mask = torch.full((self.num_patches, self.num_patches), float("-inf"))
+        attn_mask.fill_diagonal_(0.0)
+        self.register_buffer("patch_correspondence_mask", attn_mask)
 
         # since we calculate difference and sum then cat them together, the dim doubles
         self.deep_transformer = Transformer(
@@ -294,8 +274,13 @@ class BAST_Variant(nn.Module):
         # x_l = self.early_transformer(x_l)
         # x_r = self.early_transformer(x_r)
 
-        attended_l, _ = self.cross_attn(query=x_l, key=x_r, value=x_r)
-        attended_r, _ = self.cross_attn(query=x_r, key=x_l, value=x_l)
+        # Cross-attention with patch-to-patch correspondence (diagonal mask)
+        attended_l, _ = self.cross_attn(
+            query=x_l, key=x_r, value=x_r, attn_mask=self.patch_correspondence_mask
+        )
+        attended_r, _ = self.cross_attn(
+            query=x_r, key=x_l, value=x_l, attn_mask=self.patch_correspondence_mask
+        )
 
         x_l = self.norm_cross(x_l + attended_l)
         x_r = self.norm_cross(x_r + attended_r)
