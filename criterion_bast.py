@@ -75,27 +75,35 @@ class MixWithCartesianCoordinate(nn.Module):
         loss2 = torch.mean(torch.acos(dot))
         return loss1 + loss2
 
+
 class UncertaintyWeighter(nn.Module):
     """
     Learn per-task weights using homoscedastic uncertainty (Kendall & Gal 2018).
     Wraps loc/cls losses: total = sum(0.5 * (exp(-s_i) * L_i + s_i))
     """
-    def __init__(self, init_log_vars: dict[str, float] = None):
+
+    def __init__(self, init_log_vars: dict[str, float] | None = None):
         super().__init__()
-        init_log_vars = init_log_vars or {"loc": 0.0, "cls": 0.0}
-        self.log_vars = nn.ParameterDict({
-            name: nn.Parameter(torch.tensor(val, dtype=torch.float32))
-            for name, val in init_log_vars.items()
-        })
+        if init_log_vars is None:
+            init_log_vars = {"loc": 0.0, "cls": 0.0}
+        self.log_vars = nn.ParameterDict()
+        for name, val in init_log_vars.items():
+            # Explicitly create parameter without specifying device - will inherit from module
+            self.log_vars[name] = nn.Parameter(torch.tensor(val, dtype=torch.float32))
 
     def forward(self, loss_dict: dict[str, torch.Tensor]) -> torch.Tensor:
         # Expects keys "loc" and "cls" in loss_dict
-        total = 0.0
+        total = torch.tensor(0.0)
         for name in ("loc", "cls"):
             L = loss_dict[name]
             s = self.log_vars[name]
-            total += 0.5 * (torch.exp(-s) * L + s)
+            # Ensure s is on same device as L
+            if s.device != L.device:
+                s = s.to(L.device)
+            term = 0.5 * (torch.exp(-s) * L + s)
+            total = total.to(term.device) + term
         return total
+
 
 def focal_bce_with_logits(
     logits: torch.Tensor,
@@ -236,7 +244,7 @@ class SetCriterionBAST(nn.Module):
         """
         pred_cls_logit: [K, C]
         gt_cls_onehot: [N, C] (multi-label one-hot)
-        Returns cost matrix [K, N] using positives-only focal BCE averaged per GT source.
+        Returns cost matrix [K, N] using focal BCE for consistency with final loss.
         Lower is better.
         """
         if gt_cls_onehot.numel() == 0:
@@ -249,6 +257,7 @@ class SetCriterionBAST(nn.Module):
             pred_cls_logit.size(0), -1, -1
         )  # [K,N,C]
 
+        # Use same focal loss as final loss for consistency
         focal = focal_bce_with_logits(
             logits,
             targets,
@@ -258,22 +267,25 @@ class SetCriterionBAST(nn.Module):
             pos_weight=self.cls_pos_weight,
         )  # [K,N,C]
 
-        pos_mask = targets > 0
-        neg_mask = ~pos_mask
-
-        num_pos = pos_mask.sum().float()
-        num_neg = neg_mask.sum().float()
-
-        pos_weight_auto = 1.0
-        neg_weight_auto = num_pos / (num_neg + 1e-8)
-
-        pos_count = pos_mask.sum(dim=-1).clamp_min(1)
-        neg_count = neg_mask.sum(dim=-1).clamp_min(1)
-
-        pos_cost = (focal * pos_mask).sum(dim=-1) / pos_count  # [K,N]
-        neg_cost = (focal * neg_mask).sum(dim=-1) / neg_count
-        cost = pos_weight_auto * pos_cost + neg_weight_auto * neg_cost
+        # Simple average over classes - no additional weighting
+        cost = focal.mean(dim=-1)  # [K,N]
         return cost
+
+    @staticmethod
+    def _robust_normalize(cost_matrix: torch.Tensor) -> torch.Tensor:
+        """
+        Min-max normalize cost matrix to [0, 1] range.
+        More stable than z-score normalization, especially with few sources.
+        """
+        min_val = cost_matrix.min()
+        max_val = cost_matrix.max()
+        range_val = max_val - min_val
+
+        # If all costs are identical, return zeros (no preference)
+        if range_val < 1e-6:
+            return torch.zeros_like(cost_matrix)
+
+        return (cost_matrix - min_val) / range_val
 
     def _hungarian(self, pred_loc, pred_cls_logit, gt_loc, gt_cls):
         """
@@ -291,11 +303,13 @@ class SetCriterionBAST(nn.Module):
             loc_cost = self._pairwise_loc_cost(pred_loc, gt_loc)  # [K,N]
             cls_cost = self._pairwise_cls_cost(pred_cls_logit, gt_cls)  # [K,N]
 
-            loc_cost_norm = (loc_cost - loc_cost.mean()) / (loc_cost.std() + 1e-8)
-            cls_cost_norm = (cls_cost - cls_cost.mean()) / (cls_cost.std() + 1e-8)
+            # Use robust min-max normalization instead of unstable z-score
+            loc_cost_norm = self._robust_normalize(loc_cost)
+            cls_cost_norm = self._robust_normalize(cls_cost)
 
             total_cost = (
-                self.loc_cost_weight * loc_cost_norm + self.cls_cost_weight * cls_cost_norm
+                self.loc_cost_weight * loc_cost_norm
+                + self.cls_cost_weight * cls_cost_norm
             )
 
             cost_np = total_cost.detach().cpu().numpy()
@@ -363,7 +377,10 @@ class SetCriterionBAST(nn.Module):
         loc_loss = total_loc / denom
         cls_loss = total_cls / denom
 
-        if getattr(self, "task_weighter", None) is not None and samples_with_sources > 0:
+        if (
+            getattr(self, "task_weighter", None) is not None
+            and samples_with_sources > 0
+        ):
             total = self.task_weighter({"loc": loc_loss, "cls": cls_loss})
         else:
             total = self.loc_weight * loc_loss + self.cls_weight * cls_loss

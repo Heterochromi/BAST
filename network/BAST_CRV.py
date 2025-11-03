@@ -202,14 +202,14 @@ class BAST_CRV(nn.Module):
 
         self.dropout = nn.Dropout(emb_dropout)
 
-        # self.early_transformer = Transformer(
-        #     dim,
-        #     depth=num_encoder_layers - 2,
-        #     heads=heads,
-        #     dim_head=dim_head,
-        #     mlp_dim=mlp_dim,
-        #     dropout=dropout,
-        # )
+        self.early_transformer = Transformer(
+            dim,
+            depth=num_encoder_layers,
+            heads=heads,
+            dim_head=dim // heads,
+            mlp_dim=mlp_dim,
+            dropout=dropout,
+        )
 
         self.cross_attn = nn.MultiheadAttention(
             dim, heads, dropout=dropout, batch_first=True
@@ -257,7 +257,7 @@ class BAST_CRV(nn.Module):
     def forward(self, img):
         # Input: [B, 2,2(component_real_imag_split),  H, W] (stereo spectrogram)
         # Spectrogram shape: torch.Size([2, 129, 18, 2])
-        # Spectrogram names: ('channel', 'freq', 'time', 'component')
+        # Spectrogram names: ('channel','component','freq', 'time')
         B = img.size(0)
 
         channel_l = img[:, 0, :, :, :]
@@ -272,8 +272,8 @@ class BAST_CRV(nn.Module):
         x_l = self.dropout(x_l)
         x_r = self.dropout(x_r)
 
-        # x_l = self.early_transformer(x_l)
-        # x_r = self.early_transformer(x_r)
+        x_l = self.early_transformer(x_l)
+        x_r = self.early_transformer(x_r)
 
         # Cross-attention with patch-to-patch correspondence (diagonal mask)
         attended_l, _ = self.cross_attn(
@@ -303,5 +303,171 @@ class BAST_CRV(nn.Module):
         loc_out = torch.tanh(self.loc_head(shared_features))
 
         cls_logit = self.cls_head(shared_features)
+
+        return loc_out, cls_logit
+
+
+class BAST_CRV_Simple(nn.Module):
+    """
+    Simplified BAST_CRV without DETR-style decoder.
+    Uses encoder only with global pooling to predict a single source.
+    """
+
+    def __init__(
+        self,
+        *,
+        image_size,  # e.g., (129, 61) - (freq, time)
+        patch_size,  # e.g., 16
+        num_coordinates_output,  # e.g., 2 (azimuth, elevation) or 3 (x,y,z)
+        dim,  # embedding dimension, e.g., 512
+        heads,  # number of attention heads, e.g., 8
+        num_encoder_layers=6,
+        mlp_ratio=4,
+        dropout=0.2,
+        emb_dropout=0.0,
+        binaural_integration="CROSS_ATTN",
+        num_classes_cls=1,
+    ):
+        super().__init__()
+        self.binaural_integration = binaural_integration
+        self.num_coordinates_output = num_coordinates_output
+        self.num_classes_cls = num_classes_cls
+        self.num_encoder_layers = num_encoder_layers
+
+        # --- Compute patch grid dimensions and padding ---
+        mlp_dim = int(dim * mlp_ratio)
+        image_height, image_width = image_size
+        patch_height = patch_width = patch_size
+
+        num_patches_height = int(np.ceil(image_height / patch_height))
+        num_patches_width = int(np.ceil(image_width / patch_width))
+        padding_height = num_patches_height * patch_height - image_height
+        padding_width = num_patches_width * patch_width - image_width
+
+        self.num_patches_height = num_patches_height
+        self.num_patches_width = num_patches_width
+        self.num_patches = num_patches_height * num_patches_width
+
+        patch_dim = 2 * patch_height * patch_width
+
+        self.to_patch_embedding = nn.Sequential(
+            nn.ReflectionPad2d((0, padding_width, padding_height, 0)),
+            nn.Unfold(
+                kernel_size=(patch_size, patch_size),
+                stride=patch_height,
+            ),
+            Rearrange(
+                "b (c k1 k2) n -> b n (k1 k2 c)",
+                c=2,
+                k1=patch_height,
+                k2=patch_width,
+                n=self.num_patches,
+            ),
+            nn.Linear(patch_dim, dim),
+        )
+
+        self.pos_embedding = nn.Parameter(
+            torch.zeros(1, self.num_patches, dim), requires_grad=True
+        )
+        nn.init.trunc_normal_(self.pos_embedding, std=0.2)
+
+        self.dropout = nn.Dropout(emb_dropout)
+
+        self.early_transformer = Transformer(
+            dim,
+            depth=num_encoder_layers,
+            heads=heads,
+            dim_head=dim // heads,
+            mlp_dim=mlp_dim,
+            dropout=dropout,
+        )
+
+        self.cross_attn = nn.MultiheadAttention(
+            dim, heads, dropout=dropout, batch_first=True
+        )
+        self.norm_cross = nn.LayerNorm(dim)
+
+        # Create diagonal attention mask for patch-to-patch correspondence
+        attn_mask = torch.full((self.num_patches, self.num_patches), float("-inf"))
+        attn_mask.fill_diagonal_(0.0)
+        self.register_buffer("patch_correspondence_mask", attn_mask)
+
+        self.deep_transformer = Transformer(
+            dim,
+            depth=num_encoder_layers,
+            heads=heads,
+            dim_head=dim // heads,
+            mlp_dim=mlp_dim,
+            dropout=dropout,
+        )
+
+        # Simple pooling and prediction heads (no DETR decoder)
+        self.pool = nn.AdaptiveAvgPool1d(1)  # Pool over sequence dimension
+
+        self.prediction_head = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, mlp_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+
+        self.loc_head = nn.Linear(
+            mlp_dim, self.num_classes_cls * self.num_coordinates_output
+        )
+        self.cls_head = nn.Linear(mlp_dim, self.num_classes_cls)
+
+    def forward(self, img):
+        # Input: [B, 2, 2, H, W] (stereo spectrogram with real/imag split)
+        # Spectrogram names: ('channel','component','freq', 'time')
+        B = img.size(0)
+
+        channel_l = img[:, 0, :, :, :]
+        channel_r = img[:, 1, :, :, :]
+
+        x_l = self.to_patch_embedding(channel_l)
+        x_r = self.to_patch_embedding(channel_r)
+
+        x_l = x_l + self.pos_embedding
+        x_r = x_r + self.pos_embedding
+
+        x_l = self.dropout(x_l)
+        x_r = self.dropout(x_r)
+
+        x_l = self.early_transformer(x_l)
+        x_r = self.early_transformer(x_r)
+
+        # Cross-attention with patch-to-patch correspondence (diagonal mask)
+        attended_l, _ = self.cross_attn(
+            query=x_l, key=x_r, value=x_r, attn_mask=self.patch_correspondence_mask
+        )
+        attended_r, _ = self.cross_attn(
+            query=x_r, key=x_l, value=x_l, attn_mask=self.patch_correspondence_mask
+        )
+
+        x_l = self.norm_cross(x_l + attended_l)
+        x_r = self.norm_cross(x_r + attended_r)
+
+        x_diff = x_r - x_l
+
+        # Deep processing after integration
+        x = self.deep_transformer(x_diff)  # [B, N, dim]
+
+        # Global pooling over patches: [B, N, dim] -> [B, dim, N] -> [B, dim, 1]
+        x = x.transpose(1, 2)  # [B, dim, N]
+        x = self.pool(x)  # [B, dim, 1]
+        x = x.squeeze(-1)  # [B, dim]
+
+        # Predict from pooled features
+        features = self.prediction_head(x)  # [B, mlp_dim]
+
+        # Location head predicts coordinates for all classes
+        loc_out = self.loc_head(features)  # [B, num_classes * num_coords]
+        loc_out = loc_out.view(
+            B, self.num_classes_cls, self.num_coordinates_output
+        )  # [B, num_classes, num_coords]
+        loc_out = torch.tanh(loc_out)
+
+        # Classification head predicts confidence for each class
+        cls_logit = self.cls_head(features)  # [B, num_classes]
 
         return loc_out, cls_logit

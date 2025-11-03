@@ -26,16 +26,16 @@ TRANSFORMER_ENCODER_DEPTH = 6
 TRANSFORMER_DECODER_DEPTH = 3
 TRANSFORMER_HEADS = 4
 TRANSFORMER_MLP_RATIO = 2
-DROPOUT = 0.1
-EMB_DROPOUT = 0.1
-
+DROPOUT = 0.05
+EMB_DROPOUT = 0.05
+PATCH_SIZE = 6
 # Binaural integration
 BINAURAL_INTEGRATION = "CROSS_ATTN"
 MAX_SOURCES = 4
 LOSS_TYPE = "MIX"
 
 # Hungarian matching and loss weights
-CLS_COST_WEIGHT_HUNGARIAN = 1
+CLS_COST_WEIGHT_HUNGARIAN = 3
 LOC_COST_WEIGHT_HUNGARIAN = 1
 # LOC_WEIGHT = 0.1
 # CLS_WEIGHT = 0.5
@@ -44,9 +44,9 @@ LOC_COST_WEIGHT_HUNGARIAN = 1
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-4
 EPOCHS = 60
-BATCH_SIZE = 250
-TEST_SPLIT = 0.7
-VAL_SPLIT = 0.5
+BATCH_SIZE = 400
+TEST_SPLIT = 0.1
+VAL_SPLIT = 0.3
 SEED = 42
 NUM_WORKERS = 4
 CLS_THRESHOLD = 0.5
@@ -55,22 +55,8 @@ CLS_THRESHOLD = 0.5
 GPU_LIST = [0] if torch.cuda.is_available() else []
 MODEL_SAVE_DIR = "./output/models/"
 MODEL_NAME = "BASTCONV_MANUAL"
-
-# Tokenizer / conv front-end for BAST_CONV
-N_CONV_INPUT_CHANNELS = 1
-
-TOKEN_KERNEL_SIZE = 2
-POOL_KERNEL_SIZE = 1
-
-TOKEN_STRIDE = 2
-POOL_STRIDE = 1
-
-TOKEN_PADDING = 1
-POOL_PADDING = 0
-
-N_CONV_LAYERS = 4
-IN_PLANES = 256
-CONV_BIAS = True
+CHECKPOINT_PATH = None  # Set to path to resume training, e.g., "./output/models/checkpoint_epoch_30.pt"
+START_EPOCH = 1  # Will be overridden if resuming from checkpoint
 # %%
 # Data setup
 torch.manual_seed(SEED)
@@ -133,9 +119,35 @@ test_loader = DataLoader(
     collate_fn=multisource_collate,
 )
 print(f"Train: {len(train_ds)} | Val: {len(val_ds)} | Test: {len(test_ds)}")
+
 # %%
-#
-print(f"data shape for train_loader:{train_loader.dataset[0][0].shape}")
+# Verify input shapes - CRITICAL for debugging
+print("\n" + "=" * 60)
+print("INPUT SHAPE VERIFICATION")
+print("=" * 60)
+for specs, loc_lists, cls_lists, n_list in train_loader:
+    print(f"✓ Batch specs shape: {specs.shape}")
+    print(
+        f"✓ Expected shape: [B={BATCH_SIZE}, channel=2, component=2, freq=129, time=18]"
+    )
+    print(f"✓ Single sample shape: {specs[0].shape}")
+    print(f"✓ Expected single: [channel=2, component=2, freq=129, time=18]")
+    print(f"✓ Specs dtype: {specs.dtype}")
+    print(f"✓ Specs device: {specs.device}")
+
+    # Verify dimensions match expected
+    expected_shape = (BATCH_SIZE, 2, 2, 129, 18)
+    if specs.shape[1:] != expected_shape[1:]:
+        print(f"\n⚠️  WARNING: Shape mismatch!")
+        print(f"   Got:      {specs.shape}")
+        print(f"   Expected: {expected_shape}")
+        raise ValueError("Input shape does not match model expectations!")
+    else:
+        print(f"✓ Shape verification PASSED")
+
+    print(f"\n✓ Number of sources in batch: {n_list.tolist()[:5]}... (showing first 5)")
+    break
+print("=" * 60 + "\n")
 
 
 # %%
@@ -143,7 +155,7 @@ print(f"data shape for train_loader:{train_loader.dataset[0][0].shape}")
 def build_model_manual():
     net = BAST_CRV(
         image_size=SPECTROGRAM_SIZE,
-        patch_size=4,
+        patch_size=PATCH_SIZE,
         num_coordinates_output=NUM_OUTPUT,
         dim=EMBEDDING_DIM,
         heads=TRANSFORMER_HEADS,
@@ -194,11 +206,11 @@ def build_criterion_manual():
     return criterion
 
 
-def build_optimizer_manual(net):
+def build_optimizer_manual(net, criterion=None):
     # Include criterion params (e.g., UncertaintyWeighter) in optimizer if available
     params = list(net.parameters())
-    if "criterion" in globals() and isinstance(globals()["criterion"], nn.Module):
-        params += list(globals()["criterion"].parameters())
+    if criterion is not None and isinstance(criterion, nn.Module):
+        params += list(criterion.parameters())
     optimizer = torch.optim.AdamW(
         params,
         lr=LEARNING_RATE,
@@ -248,12 +260,82 @@ def validate(net, epoch, criterion, device):
 
 
 # %%
-# Training loop (manual)
+# Training loop (manual) with checkpoint support
 best_val = float("inf")
 net, device = build_model_manual()
 criterion = build_criterion_manual()
 criterion = criterion.to(device)
-optimizer = build_optimizer_manual(net)
+# Move criterion parameters to device explicitly
+for param in criterion.parameters():
+    param.data = param.data.to(device)
+optimizer = build_optimizer_manual(net, criterion)
+
+# Load checkpoint if resuming
+if CHECKPOINT_PATH is not None and os.path.exists(CHECKPOINT_PATH):
+    print(f"\n{'=' * 60}")
+    print(f"RESUMING FROM CHECKPOINT: {CHECKPOINT_PATH}")
+    print(f"{'=' * 60}")
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
+
+    # Check if this is an old checkpoint (just model weights) or new checkpoint (full state)
+    is_old_checkpoint = (
+        "model_state_dict" not in checkpoint
+        and "optimizer_state_dict" not in checkpoint
+    )
+
+    if is_old_checkpoint:
+        print("⚠️  Old checkpoint format detected (model weights only)")
+        print("   Optimizer and scheduler will start from scratch")
+        print("")
+        print("   💡 IMPORTANT: You need to manually set START_EPOCH!")
+        print(f"   Currently set to: {START_EPOCH}")
+        print("   If you trained 30 epochs, set START_EPOCH = 31 in the config section")
+        print("")
+
+        # Old checkpoint: directly contains state_dict
+        if isinstance(net, nn.DataParallel):
+            net.module.load_state_dict(checkpoint)
+        else:
+            net.load_state_dict(checkpoint)
+
+        print(f"✓ Model weights loaded")
+        print(f"✓ Starting from epoch {START_EPOCH}")
+        print(f"✓ Note: Training will continue but optimizer state is reset")
+    else:
+        # New checkpoint: contains full training state
+        print("✓ New checkpoint format detected (full training state)")
+
+        # Load model state
+        if isinstance(net, nn.DataParallel):
+            net.module.load_state_dict(checkpoint["model_state_dict"])
+        else:
+            net.load_state_dict(checkpoint["model_state_dict"])
+
+        # Load optimizer state
+        if "optimizer_state_dict" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            print(f"✓ Optimizer state loaded")
+
+        # Load criterion state (for uncertainty weighter)
+        if "criterion_state_dict" in checkpoint:
+            criterion.load_state_dict(checkpoint["criterion_state_dict"])
+            print(f"✓ Criterion state loaded (uncertainty weights preserved)")
+
+        # Load training state
+        if "epoch" in checkpoint:
+            START_EPOCH = checkpoint["epoch"] + 1
+        if "best_val" in checkpoint:
+            best_val = checkpoint["best_val"]
+
+        print(f"✓ Resumed from epoch {checkpoint.get('epoch', 'unknown')}")
+        print(f"✓ Best validation loss: {best_val:.4f}")
+        print(f"✓ Continuing from epoch {START_EPOCH}")
+
+    print(f"{'=' * 60}\n")
+else:
+    print(f"\n{'=' * 60}")
+    print("STARTING FRESH TRAINING")
+    print(f"{'=' * 60}\n")
 
 # %%
 batches_per_epoch = len(train_loader)
@@ -266,14 +348,33 @@ step_size_up = steps_per_cycle // 2
 
 scheduler = CyclicLR(
     optimizer,
-    base_lr=2e-5,
-    max_lr=3e-4,
+    base_lr=1e-5,
+    max_lr=1e-4,  # Lowered from 3e-4 for better stability with transformers
     step_size_up=step_size_up,
     mode="triangular2",
     cycle_momentum=False,
 )
+
+# If resuming from new checkpoint, advance scheduler to correct position
+if CHECKPOINT_PATH is not None and os.path.exists(CHECKPOINT_PATH):
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
+    # Only advance scheduler if we have epoch information (new checkpoint format)
+    if "epoch" in checkpoint:
+        steps_taken = (checkpoint["epoch"]) * batches_per_epoch
+        for _ in range(steps_taken):
+            scheduler.step()
+        print(f"✓ Scheduler advanced by {steps_taken} steps\n")
+    else:
+        print(f"⚠️  Scheduler starting from beginning (old checkpoint format)\n")
 # %%
-for epoch in range(1, EPOCHS + 1):
+# Initialize tracking for debugging
+prev_total_loss = None
+print(f"\n{'=' * 60}")
+print("TRAINING STARTED")
+print(f"{'=' * 60}")
+print(f"Initial LR: {optimizer.param_groups[0]['lr']:.2e}\n")
+
+for epoch in range(START_EPOCH, EPOCHS + 1):
     net.train()
     epoch_losses = {
         "total": 0.0,
@@ -288,7 +389,11 @@ for epoch in range(1, EPOCHS + 1):
         "matched_pairs": 0,
         "batches": 0,
     }
-    for specs, loc_lists, cls_lists, n_list in train_loader:
+
+    # Track gradient norms
+    grad_norms = []
+
+    for batch_idx, (specs, loc_lists, cls_lists, n_list) in enumerate(train_loader):
         specs = specs.to(device)
         outputs = net(specs)
         targets = build_target_list(loc_lists, cls_lists)
@@ -296,7 +401,16 @@ for epoch in range(1, EPOCHS + 1):
         loss = loss_dict["total"]
         optimizer.zero_grad()
         loss.backward()
-        # torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
+
+        # Calculate gradient norm before clipping
+        total_norm = 0.0
+        for p in net.parameters():
+            if p.grad is not None:
+                total_norm += p.grad.data.norm(2).item() ** 2
+        total_norm = total_norm**0.5
+        grad_norms.append(total_norm)
+
+        torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
         optimizer.step()
         scheduler.step()
 
@@ -306,6 +420,50 @@ for epoch in range(1, EPOCHS + 1):
         epoch_losses["cls"] += float(loss_dict["cls"])
 
         epoch_losses["batches"] += 1
+
+        # Detailed logging for first few batches of first 3 epochs
+        if epoch <= 3 and batch_idx < 2:
+            print(f"\n--- Epoch {epoch}, Batch {batch_idx} ---")
+            print(f"  Total Loss: {loss_dict['total'].item():.4f}")
+            print(f"  Loc Loss: {loss_dict['loc'].item():.4f}")
+            print(f"  Cls Loss: {loss_dict['cls'].item():.4f}")
+            print(f"  Grad Norm (before clip): {total_norm:.4f}")
+            print(f"  Current LR: {optimizer.param_groups[0]['lr']:.2e}")
+            print(
+                f"  Num sources in batch: min={n_list.min().item()}, max={n_list.max().item()}, mean={n_list.float().mean().item():.2f}"
+            )
+
+            # Check outputs
+            loc_out, cls_logit = outputs
+            print(
+                f"  Pred loc range: [{loc_out.min().item():.3f}, {loc_out.max().item():.3f}]"
+            )
+            print(
+                f"  Pred cls logit range: [{cls_logit.min().item():.3f}, {cls_logit.max().item():.3f}]"
+            )
+
+            # Check first target
+            if len(targets) > 0 and targets[0]["loc"].numel() > 0:
+                print(
+                    f"  GT loc range: [{targets[0]['loc'].min().item():.3f}, {targets[0]['loc'].max().item():.3f}]"
+                )
+                print(
+                    f"  GT cls range: [{targets[0]['cls'].min().item():.3f}, {targets[0]['cls'].max().item():.3f}]"
+                )
+
+            # Check matching quality
+            with torch.no_grad():
+                for b_idx in range(min(2, len(targets))):
+                    if targets[b_idx]["loc"].numel() > 0:
+                        pred_idx, gt_idx = criterion._hungarian(
+                            outputs[0][b_idx],
+                            outputs[1][b_idx],
+                            targets[b_idx]["loc"],
+                            targets[b_idx]["cls"],
+                        )
+                        print(
+                            f"  Sample {b_idx}: matched {len(pred_idx)} sources - Pred slots: {pred_idx.tolist()}, GT indices: {gt_idx.tolist()}"
+                        )
 
         # Metrics
         batch_metrics = compute_batch_metrics(
@@ -324,12 +482,80 @@ for epoch in range(1, EPOCHS + 1):
         for mk in ("loc_err", "cls_exact", "cls_elem_acc"):
             metric_epoch[mk] /= metric_epoch["matched_pairs"]
 
+    # Calculate average gradient norm
+    avg_grad_norm = sum(grad_norms) / len(grad_norms) if grad_norms else 0.0
+
+    print(f"\n{'=' * 60}")
+    print(f"EPOCH {epoch}/{EPOCHS} SUMMARY")
+    print(f"{'=' * 60}")
     print(
-        f"[TRAIN] Epoch {epoch} | Total {epoch_losses['total']:.4f} | Loc {epoch_losses['loc']:.4f} | Cls {epoch_losses['cls']:.4f} | loc_err {metric_epoch['loc_err']:.3f} | ClsExact {metric_epoch['cls_exact']:.3f} | ClsElem {metric_epoch['cls_elem_acc']:.3f} |"
+        f"[TRAIN] Total {epoch_losses['total']:.4f} | Loc {epoch_losses['loc']:.4f} | Cls {epoch_losses['cls']:.4f} | loc_err {metric_epoch['loc_err']:.3f} | ClsExact {metric_epoch['cls_exact']:.3f} | ClsElem {metric_epoch['cls_elem_acc']:.3f}"
     )
+    print(f"  Avg Grad Norm: {avg_grad_norm:.4f}")
+    print(f"  Final LR this epoch: {optimizer.param_groups[0]['lr']:.2e}")
+
+    # Check uncertainty weighter
+    if hasattr(criterion, "task_weighter") and criterion.task_weighter is not None:
+        log_var_loc = criterion.task_weighter.log_vars["loc"].item()
+        log_var_cls = criterion.task_weighter.log_vars["cls"].item()
+        weight_loc = torch.exp(-torch.tensor(log_var_loc)).item()
+        weight_cls = torch.exp(-torch.tensor(log_var_cls)).item()
+        effective_loc = weight_loc * epoch_losses["loc"]
+        effective_cls = weight_cls * epoch_losses["cls"]
+
+        print(f"  🎯 Task weights - Loc: {weight_loc:.4f}, Cls: {weight_cls:.4f}")
+        if weight_cls < 0.3:  # Cls weight dropping too low
+            print(
+                "  🚨 WARNING: Cls weight dropping! Consider freezing uncertainty weighter"
+            )
+        print(
+            f"  📊 Effective contribution - Loc: {effective_loc:.4f}, Cls: {effective_cls:.4f}"
+        )
+        print(f"  📈 Log vars - Loc: {log_var_loc:.4f}, Cls: {log_var_cls:.4f}")
+
+    # Early warnings
+    if epoch == START_EPOCH:
+        if epoch_losses["total"] > 100:
+            print(
+                "\n⚠️  WARNING: Loss is very high! Check data normalization and targets."
+            )
+        if avg_grad_norm < 1e-4:
+            print("\n⚠️  WARNING: Gradients are tiny! Model might not be learning.")
+        if avg_grad_norm > 100:
+            print("\n⚠️  WARNING: Gradients are huge! Might need stronger clipping.")
+
+    # Track improvement
+    if prev_total_loss is not None:
+        improvement = (prev_total_loss - epoch_losses["total"]) / prev_total_loss * 100
+        print(f"  📉 Improvement from prev epoch: {improvement:.2f}%")
+        if abs(improvement) < 0.5 and epoch > 5:
+            print("  ⚠️  Less than 0.5% improvement - learning might be stalling")
 
     # Validate and save best
     val_metrics = validate(net, epoch, criterion, device)
+
+    # Save checkpoint every 10 epochs
+    if epoch % 10 == 0:
+        checkpoint_path = os.path.join(
+            MODEL_SAVE_DIR,
+            f"checkpoint_epoch_{epoch}.pt",
+        )
+        torch.save(
+            {
+                "epoch": epoch,
+                "model_state_dict": net.module.state_dict()
+                if isinstance(net, nn.DataParallel)
+                else net.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "criterion_state_dict": criterion.state_dict(),
+                "best_val": best_val,
+                "train_loss": epoch_losses["total"],
+                "val_loss": val_metrics["total"],
+            },
+            checkpoint_path,
+        )
+        print(f"  💾 Checkpoint saved to {checkpoint_path}")
+
     if val_metrics["total"] < best_val:
         best_val = val_metrics["total"]
         save_path = os.path.join(
@@ -337,7 +563,32 @@ for epoch in range(1, EPOCHS + 1):
             f"{MODEL_NAME}_{BINAURAL_INTEGRATION}_{LOSS_TYPE}_best.pt",
         )
         torch.save(net.state_dict(), save_path)
-        print(f"  -> New best model saved to {save_path}")
+        print(f"  ✨ New best model saved to {save_path} (val loss: {best_val:.4f})")
+
+    print(f"{'=' * 60}\n")
+
+    # Update previous loss for next iteration
+    prev_total_loss = epoch_losses["total"]
+
+# Final save
+final_checkpoint_path = os.path.join(MODEL_SAVE_DIR, f"final_epoch_{EPOCHS}.pt")
+torch.save(
+    {
+        "epoch": EPOCHS,
+        "model_state_dict": net.module.state_dict()
+        if isinstance(net, nn.DataParallel)
+        else net.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "criterion_state_dict": criterion.state_dict(),
+        "best_val": best_val,
+    },
+    final_checkpoint_path,
+)
+print(f"\n{'=' * 60}")
+print(f"TRAINING COMPLETE!")
+print(f"Final checkpoint saved to {final_checkpoint_path}")
+print(f"Best validation loss: {best_val:.4f}")
+print(f"{'=' * 60}\n")
 
 # %%
 # Optional: Single-sample inference utilities (using BAST_CONV)

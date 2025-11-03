@@ -28,12 +28,14 @@ class MultiSourceSpectrogramDataset(Dataset):
         class_map: dict | None = None,
         preserve_complex: bool = True,
         split_real_imag: bool = False,
+        filter_duplicate_classes: bool = False,
     ):
         super().__init__()
         self.df = pd.read_csv(csv_path)
         self.tensor_dir = tensor_dir
         self.preserve_complex = preserve_complex
         self.split_real_imag = split_real_imag
+        self.filter_duplicate_classes = filter_duplicate_classes
 
         required_columns = ["name_file", "classes", "x", "y", "z", "num_classes"]
         missing = [c for c in required_columns if c not in self.df.columns]
@@ -45,6 +47,27 @@ class MultiSourceSpectrogramDataset(Dataset):
         ].reset_index(drop=True)
         if len(self.df) == 0:
             raise ValueError("No valid .pt tensor files found in CSV")
+
+        # Filter out samples with duplicate classes if requested
+        if self.filter_duplicate_classes:
+            original_len = len(self.df)
+            mask = []
+            for idx in range(len(self.df)):
+                classes_str = self.df.iloc[idx]["classes"]
+                if pd.notna(classes_str):
+                    classes_list = [
+                        c.strip() for c in str(classes_str).split(",") if c.strip()
+                    ]
+                    # Check for duplicates
+                    has_duplicates = len(classes_list) != len(set(classes_list))
+                    mask.append(not has_duplicates)
+                else:
+                    mask.append(True)  # Keep samples with no classes
+            self.df = self.df[mask].reset_index(drop=True)
+            filtered_count = original_len - len(self.df)
+            print(
+                f"[Dataset] Filtered out {filtered_count} samples with duplicate classes ({original_len} -> {len(self.df)})"
+            )
 
         # Build class mapping
         all_classes = set()

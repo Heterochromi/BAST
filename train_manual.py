@@ -1,4 +1,5 @@
 # %%
+from unittest.mock import patch
 from network.BASTCONV import BAST_CONV
 from network.BAST import BAST_Variant
 from data_loading import MultiSourceSpectrogramDataset, multisource_collate
@@ -22,7 +23,8 @@ from torch.optim.lr_scheduler import CyclicLR
 CSV_PATH = "tensor_metadata.csv"
 SPECTROGRAM_SIZE = [64, 19]  # [Freq (n_mels), Time frames]
 NUM_OUTPUT = 3  # e.g., (x, y, z)
-EMBEDDING_DIM = 512
+EMBEDDING_DIM = 716
+PATCH_SIZE = 6
 TRANSFORMER_ENCODER_DEPTH = 6
 TRANSFORMER_DECODER_DEPTH = 3
 TRANSFORMER_HEADS = 4
@@ -131,8 +133,7 @@ print(f"Train: {len(train_ds)} | Val: {len(val_ds)} | Test: {len(test_ds)}")
 def build_model_manual():
     net = BAST_Variant(
         image_size=SPECTROGRAM_SIZE,
-        patch_size=4,
-        patch_overlap=0,
+        patch_size=PATCH_SIZE,
         num_coordinates_output=NUM_OUTPUT,
         dim=EMBEDDING_DIM,
         heads=TRANSFORMER_HEADS,
@@ -519,3 +520,6 @@ def test(epoch):
         f"[TEST] Epoch {epoch} | Total {running_loss['total']:.4f} | Loc {running_loss['loc']:.4f} | Cls {running_loss['cls']:.4f} | loc_err {metric_accum['loc_err']:.3f} | ClsExact {metric_accum['cls_exact']:.3f} | ClsElem {metric_accum['cls_elem_acc']:.3f}"
     )
     return {**running_loss, **metric_accum}
+
+# test single sample
+# %%
