@@ -162,146 +162,146 @@ def build_model():
 
 # %%
 def build_criterion():
-    """Simple criterion without Hungarian matching"""
-    loc_criterion = nn.MSELoss()
-    cls_criterion = nn.BCEWithLogitsLoss()
-    return loc_criterion, cls_criterion
+    """Simple criterion - only MSE loss for coordinates"""
+    loc_criterion = nn.MSELoss(reduction="sum")
+    return loc_criterion
 
 
 # %%
-def compute_loss(outputs, loc_lists, cls_lists, loc_criterion, cls_criterion):
+def compute_loss(outputs, loc_lists, cls_lists, loc_criterion):
     """
-    Compute loss for multi-source model.
-    outputs: (loc_out, cls_logit)
-        loc_out: [B, num_classes, 3]
-        cls_logit: [B, num_classes]
-    loc_lists: tuple of [N_i, 3] tensors
-    cls_lists: tuple of [N_i, num_classes] tensors
-    """
-    loc_out, cls_logit = outputs
-    B = loc_out.size(0)
+    Compute MSE loss for coordinates.
 
-    total_loc_loss = 0.0
-    total_cls_loss = 0.0
+    outputs: coords tensor of shape [B, num_classes, 3]
+    loc_lists: tuple of [N_i, 3] tensors (N_i sources per sample)
+    cls_lists: tuple of [N_i, num_classes] tensors (one-hot/multi-hot per source)
+
+    For each class:
+    - If class doesn't exist in ground truth: target is (0, 0, 0)
+    - If class exists: target is the actual xyz coordinates
+    """
+    coords = outputs  # [B, num_classes, 3]
+    B, num_classes, _ = coords.shape
+    device = coords.device
+
+    total_loss = 0.0
     num_valid_samples = 0
 
     for i in range(B):
         gt_locs = loc_lists[i]  # [N_i, 3]
         gt_cls = cls_lists[i]  # [N_i, num_classes]
 
-        if gt_locs.size(0) == 0:
-            continue
+        # Create target tensor: [num_classes, 3]
+        # Initialize all to (0, 0, 0)
+        target = torch.zeros(num_classes, 3, device=device)
 
-        # For each ground truth source, find best matching predicted class
-        pred_locs = loc_out[i]  # [num_classes, 3]
-        pred_cls = cls_logit[i]  # [num_classes]
+        # For each ground truth source
+        for j in range(gt_locs.size(0)):
+            source_loc = gt_locs[j]  # [3]
+            source_cls = gt_cls[j]  # [num_classes]
 
-        # Take first N sources (where N = number of GT sources)
-        n_sources = min(gt_locs.size(0), pred_locs.size(0))
+            # Find which class(es) this source belongs to
+            active_classes = torch.where(source_cls > 0)[0]
 
-        # Simple matching: use first n_sources predictions for first n_sources GTs
-        loc_loss = loc_criterion(
-            pred_locs[:n_sources], gt_locs[:n_sources].to(pred_locs.device)
-        )
-        cls_loss = cls_criterion(
-            pred_cls[:n_sources].unsqueeze(0),
-            gt_cls[:n_sources].to(pred_cls.device).max(dim=1)[0].unsqueeze(0),
-        )
+            # Assign the location to each active class
+            for cls_idx in active_classes:
+                target[cls_idx] = source_loc.to(device)
 
-        total_loc_loss += (
-            loc_loss.item() if isinstance(loc_loss, torch.Tensor) else loc_loss
-        )
-        total_cls_loss += (
-            cls_loss.item() if isinstance(cls_loss, torch.Tensor) else cls_loss
-        )
+        # Compute MSE loss for this sample
+        pred = coords[i]  # [num_classes, 3]
+        loss = loc_criterion(pred, target)
+
+        total_loss += loss
         num_valid_samples += 1
 
+    # Average over batch
     if num_valid_samples > 0:
-        total_loc_loss /= num_valid_samples
-        total_cls_loss /= num_valid_samples
-
-    total_loss = LOC_WEIGHT * total_loc_loss + CLS_WEIGHT * total_cls_loss
+        total_loss = total_loss / num_valid_samples
+    else:
+        total_loss = torch.tensor(0.0, requires_grad=True, device=device)
 
     return {
-        "total": torch.tensor(total_loss, requires_grad=True)
-        if num_valid_samples > 0
-        else torch.tensor(0.0, requires_grad=True),
-        "loc": total_loc_loss,
-        "cls": total_cls_loss,
+        "total": total_loss,
+        "loc": total_loss.item() if isinstance(total_loss, torch.Tensor) else 0.0,
     }
 
 
 # %%
 def compute_metrics(outputs, loc_lists, cls_lists, threshold=0.5):
     """
-    Compute evaluation metrics for multi-source.
+    Compute evaluation metrics.
+
+    outputs: coords tensor of shape [B, num_classes, 3]
+
+    Classification is inferred: if predicted coords are close to (0,0,0),
+    the class is considered inactive.
     """
-    loc_out, cls_logit = outputs
-    B = loc_out.size(0)
+    coords = outputs  # [B, num_classes, 3]
+    B, num_classes, _ = coords.shape
+    device = coords.device
 
     total_loc_err = 0.0
-    total_cls_exact = 0.0
-    total_cls_elem_acc = 0.0
-    matched_pairs = 0
+    total_cls_correct = 0.0
+    total_cls_count = 0
+    num_samples = 0
 
     for i in range(B):
         gt_locs = loc_lists[i]  # [N_i, 3]
         gt_cls = cls_lists[i]  # [N_i, num_classes]
 
-        if gt_locs.size(0) == 0:
-            continue
+        # Build ground truth target: [num_classes, 3]
+        target = torch.zeros(num_classes, 3, device=device)
+        gt_active_classes = torch.zeros(num_classes, dtype=torch.bool, device=device)
 
-        pred_locs = loc_out[i]  # [num_classes, 3]
-        pred_cls = cls_logit[i]  # [num_classes]
+        for j in range(gt_locs.size(0)):
+            source_loc = gt_locs[j]
+            source_cls = gt_cls[j]
+            active_classes = torch.where(source_cls > 0)[0]
 
-        n_sources = min(gt_locs.size(0), pred_locs.size(0))
+            for cls_idx in active_classes:
+                target[cls_idx] = source_loc.to(device)
+                gt_active_classes[cls_idx] = True
 
-        # Localization error
-        loc_err = (
-            torch.norm(
-                pred_locs[:n_sources] - gt_locs[:n_sources].to(pred_locs.device), dim=1
+        pred = coords[i]  # [num_classes, 3]
+
+        # Localization error (only for active classes)
+        active_indices = torch.where(gt_active_classes)[0]
+        if len(active_indices) > 0:
+            loc_errors = torch.norm(
+                pred[active_indices] - target[active_indices], dim=1
             )
-            .mean()
-            .item()
-        )
-        total_loc_err += loc_err * n_sources
+            total_loc_err += loc_errors.sum().item()
+            num_samples += len(active_indices)
 
         # Classification accuracy
-        cls_pred = (torch.sigmoid(pred_cls[:n_sources]) > threshold).float()
-        gt_cls_binary = (gt_cls[:n_sources].to(cls_pred.device).sum(dim=1) > 0).float()
-        cls_exact = (
-            (cls_pred == gt_cls_binary.unsqueeze(1)).all(dim=1).float().mean().item()
-        )
-        cls_elem_acc = (cls_pred == gt_cls_binary.unsqueeze(1)).float().mean().item()
+        # Predicted class is active if norm of coordinates > threshold
+        pred_active = torch.sqrt(torch.sum(pred**2, dim=1)) > threshold
+        cls_correct = (pred_active == gt_active_classes).float().sum().item()
 
-        total_cls_exact += cls_exact * n_sources
-        total_cls_elem_acc += cls_elem_acc * n_sources
-        matched_pairs += n_sources
+        total_cls_correct += cls_correct
+        total_cls_count += num_classes
 
-    if matched_pairs > 0:
+    if num_samples > 0 and total_cls_count > 0:
         return {
-            "loc_err": total_loc_err / matched_pairs,
-            "cls_exact": total_cls_exact / matched_pairs,
-            "cls_elem_acc": total_cls_elem_acc / matched_pairs,
-            "matched_pairs": matched_pairs,
+            "loc_err": total_loc_err / num_samples,
+            "cls_acc": total_cls_correct / total_cls_count,
+            "matched_pairs": num_samples,
         }
     else:
         return {
             "loc_err": 0.0,
-            "cls_exact": 0.0,
-            "cls_elem_acc": 0.0,
+            "cls_acc": 0.0,
             "matched_pairs": 0,
         }
 
 
 # %%
-def validate(net, epoch, loc_criterion, cls_criterion, device):
+def validate(net, epoch, loc_criterion, device):
     net.eval()
-    running_loss = {"total": 0.0, "loc": 0.0, "cls": 0.0, "batches": 0}
+    running_loss = {"total": 0.0, "loc": 0.0, "batches": 0}
     running_metrics = {
         "loc_err": 0.0,
-        "cls_exact": 0.0,
-        "cls_elem_acc": 0.0,
+        "cls_acc": 0.0,
         "matched_pairs": 0,
         "batches": 0,
     }
@@ -311,35 +311,37 @@ def validate(net, epoch, loc_criterion, cls_criterion, device):
             specs = specs.to(device)
 
             outputs = net(specs)
-            losses = compute_loss(
-                outputs, loc_lists, cls_lists, loc_criterion, cls_criterion
-            )
+            losses = compute_loss(outputs, loc_lists, cls_lists, loc_criterion)
 
-            for k in ("total", "loc", "cls"):
-                running_loss[k] += float(losses[k])
+            running_loss["total"] += float(losses["total"])
+            running_loss["loc"] += float(losses["loc"])
             running_loss["batches"] += 1
 
             metrics = compute_metrics(outputs, loc_lists, cls_lists, CLS_THRESHOLD)
             mp = metrics["matched_pairs"]
             if mp > 0:
-                for k in ("loc_err", "cls_exact", "cls_elem_acc"):
-                    running_metrics[k] += metrics[k] * mp
+                running_metrics["loc_err"] += metrics["loc_err"] * mp
+                running_metrics["cls_acc"] += (
+                    metrics["cls_acc"] * metrics["matched_pairs"]
+                    if "cls_acc" in metrics
+                    else 0
+                )
                 running_metrics["matched_pairs"] += mp
             running_metrics["batches"] += 1
 
     # Average losses and metrics
-    for k in ("total", "loc", "cls"):
-        running_loss[k] /= max(running_loss["batches"], 1)
+    running_loss["total"] /= max(running_loss["batches"], 1)
+    running_loss["loc"] /= max(running_loss["batches"], 1)
+
     if running_metrics["matched_pairs"] > 0:
-        for k in ("loc_err", "cls_exact", "cls_elem_acc"):
-            running_metrics[k] /= running_metrics["matched_pairs"]
+        running_metrics["loc_err"] /= running_metrics["matched_pairs"]
+        running_metrics["cls_acc"] /= running_loss["batches"]
 
     print(
         f"[VAL] Epoch {epoch} | Total {running_loss['total']:.4f} | "
-        f"Loc {running_loss['loc']:.4f} | Cls {running_loss['cls']:.4f} | "
+        f"Loc {running_loss['loc']:.4f} | "
         f"loc_err {running_metrics['loc_err']:.3f} | "
-        f"ClsExact {running_metrics['cls_exact']:.3f} | "
-        f"ClsElem {running_metrics['cls_elem_acc']:.3f}"
+        f"ClsAcc {running_metrics['cls_acc']:.3f}"
     )
     return {**running_loss, **running_metrics}
 
@@ -348,7 +350,7 @@ def validate(net, epoch, loc_criterion, cls_criterion, device):
 # Build model and criterion
 best_val = float("inf")
 net, device = build_model()
-loc_criterion, cls_criterion = build_criterion()
+loc_criterion = build_criterion()
 optimizer = torch.optim.AdamW(
     net.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
 )
@@ -370,7 +372,8 @@ if CHECKPOINT_PATH is not None and os.path.exists(CHECKPOINT_PATH):
         print(f"✓ Optimizer state loaded")
 
     if "epoch" in checkpoint:
-        START_EPOCH = checkpoint["epoch"] + 1
+        start_epoch = checkpoint["epoch"] + 1
+        START_EPOCH = start_epoch
     if "best_val" in checkpoint:
         best_val = checkpoint["best_val"]
 
@@ -419,11 +422,10 @@ prev_total_loss = None
 
 for epoch in range(START_EPOCH, EPOCHS + 1):
     net.train()
-    epoch_losses = {"total": 0.0, "loc": 0.0, "cls": 0.0, "batches": 0}
+    epoch_losses = {"total": 0.0, "loc": 0.0, "batches": 0}
     epoch_metrics = {
         "loc_err": 0.0,
-        "cls_exact": 0.0,
-        "cls_elem_acc": 0.0,
+        "cls_acc": 0.0,
         "matched_pairs": 0,
         "batches": 0,
     }
@@ -433,14 +435,8 @@ for epoch in range(START_EPOCH, EPOCHS + 1):
         specs = specs.to(device)
 
         outputs = net(specs)
-        loss_dict = compute_loss(
-            outputs, loc_lists, cls_lists, loc_criterion, cls_criterion
-        )
+        loss_dict = compute_loss(outputs, loc_lists, cls_lists, loc_criterion)
         loss = loss_dict["total"]
-
-        # Ensure loss is a tensor before calling backward
-        if not isinstance(loss, torch.Tensor):
-            loss = torch.tensor(loss, requires_grad=True)
 
         optimizer.zero_grad()
         loss.backward()
@@ -458,45 +454,21 @@ for epoch in range(START_EPOCH, EPOCHS + 1):
         scheduler.step()
 
         # Accumulate losses
-        epoch_losses["total"] += float(
-            loss_dict["total"].detach().item()
-            if isinstance(loss_dict["total"], torch.Tensor)
-            else loss_dict["total"]
-        )
+        epoch_losses["total"] += float(loss_dict["total"].detach().item())
         epoch_losses["loc"] += float(loss_dict["loc"])
-        epoch_losses["cls"] += float(loss_dict["cls"])
         epoch_losses["batches"] += 1
 
         # Detailed logging for first few batches
         if epoch <= 3 and batch_idx < 2:
             print(f"\n--- Epoch {epoch}, Batch {batch_idx} ---")
-            total_loss_val = (
-                loss_dict["total"].item()
-                if isinstance(loss_dict["total"], torch.Tensor)
-                else loss_dict["total"]
-            )
-            loc_loss_val = (
-                loss_dict["loc"]
-                if not isinstance(loss_dict["loc"], torch.Tensor)
-                else loss_dict["loc"].item()
-            )
-            cls_loss_val = (
-                loss_dict["cls"]
-                if not isinstance(loss_dict["cls"], torch.Tensor)
-                else loss_dict["cls"].item()
-            )
-            print(f"  Total Loss: {total_loss_val:.4f}")
-            print(f"  Loc Loss: {loc_loss_val:.4f}")
-            print(f"  Cls Loss: {cls_loss_val:.4f}")
+            print(f"  Total Loss: {loss_dict['total'].item():.4f}")
+            print(f"  Loc Loss: {loss_dict['loc']:.4f}")
             print(f"  Grad Norm: {total_norm:.4f}")
             print(f"  Current LR: {optimizer.param_groups[0]['lr']:.2e}")
 
-            loc_out, cls_logit = outputs
+            coords = outputs
             print(
-                f"  Pred loc range: [{loc_out.min().item():.3f}, {loc_out.max().item():.3f}]"
-            )
-            print(
-                f"  Pred cls range: [{cls_logit.min().item():.3f}, {cls_logit.max().item():.3f}]"
+                f"  Pred coords range: [{coords.min().item():.3f}, {coords.max().item():.3f}]"
             )
             print(f"  Number of sources in batch: {n_list.sum().item()}")
 
@@ -504,17 +476,18 @@ for epoch in range(START_EPOCH, EPOCHS + 1):
         metrics = compute_metrics(outputs, loc_lists, cls_lists, CLS_THRESHOLD)
         mp = metrics["matched_pairs"]
         if mp > 0:
-            for k in ("loc_err", "cls_exact", "cls_elem_acc"):
-                epoch_metrics[k] += metrics[k] * mp
+            epoch_metrics["loc_err"] += metrics["loc_err"] * mp
+            epoch_metrics["cls_acc"] += metrics["cls_acc"] * metrics["matched_pairs"]
             epoch_metrics["matched_pairs"] += mp
         epoch_metrics["batches"] += 1
 
     # Average losses and metrics
-    for k in ("total", "loc", "cls"):
-        epoch_losses[k] /= max(epoch_losses["batches"], 1)
+    epoch_losses["total"] /= max(epoch_losses["batches"], 1)
+    epoch_losses["loc"] /= max(epoch_losses["batches"], 1)
+
     if epoch_metrics["matched_pairs"] > 0:
-        for k in ("loc_err", "cls_exact", "cls_elem_acc"):
-            epoch_metrics[k] /= epoch_metrics["matched_pairs"]
+        epoch_metrics["loc_err"] /= epoch_metrics["matched_pairs"]
+        epoch_metrics["cls_acc"] /= epoch_losses["batches"]
 
     avg_grad_norm = sum(grad_norms) / len(grad_norms) if grad_norms else 0.0
 
@@ -523,10 +496,9 @@ for epoch in range(START_EPOCH, EPOCHS + 1):
     print(f"{'=' * 60}")
     print(
         f"[TRAIN] Total {epoch_losses['total']:.4f} | "
-        f"Loc {epoch_losses['loc']:.4f} | Cls {epoch_losses['cls']:.4f} | "
+        f"Loc {epoch_losses['loc']:.4f} | "
         f"loc_err {epoch_metrics['loc_err']:.3f} | "
-        f"ClsExact {epoch_metrics['cls_exact']:.3f} | "
-        f"ClsElem {epoch_metrics['cls_elem_acc']:.3f}"
+        f"ClsAcc {epoch_metrics['cls_acc']:.3f}"
     )
     print(f"  Avg Grad Norm: {avg_grad_norm:.4f}")
     print(f"  Final LR this epoch: {optimizer.param_groups[0]['lr']:.2e}")
@@ -537,7 +509,7 @@ for epoch in range(START_EPOCH, EPOCHS + 1):
         print(f"  📉 Improvement from prev epoch: {improvement:.2f}%")
 
     # Validate
-    val_metrics = validate(net, epoch, loc_criterion, cls_criterion, device)
+    val_metrics = validate(net, epoch, loc_criterion, device)
 
     # Save checkpoint every 10 epochs
     if epoch % 10 == 0:
@@ -602,11 +574,10 @@ print(f"{'=' * 60}\n")
 def test():
     """Test the model on test set"""
     net.eval()
-    running_loss = {"total": 0.0, "loc": 0.0, "cls": 0.0, "batches": 0}
+    running_loss = {"total": 0.0, "loc": 0.0, "batches": 0}
     running_metrics = {
         "loc_err": 0.0,
-        "cls_exact": 0.0,
-        "cls_elem_acc": 0.0,
+        "cls_acc": 0.0,
         "matched_pairs": 0,
         "batches": 0,
     }
@@ -616,38 +587,38 @@ def test():
             specs = specs.to(device)
 
             outputs = net(specs)
-            losses = compute_loss(
-                outputs, loc_lists, cls_lists, loc_criterion, cls_criterion
-            )
+            losses = compute_loss(outputs, loc_lists, cls_lists, loc_criterion)
 
-            for k in ("total", "loc", "cls"):
-                running_loss[k] += float(losses[k])
+            running_loss["total"] += float(losses["total"])
+            running_loss["loc"] += float(losses["loc"])
             running_loss["batches"] += 1
 
             metrics = compute_metrics(outputs, loc_lists, cls_lists, CLS_THRESHOLD)
             mp = metrics["matched_pairs"]
             if mp > 0:
-                for k in ("loc_err", "cls_exact", "cls_elem_acc"):
-                    running_metrics[k] += metrics[k] * mp
+                running_metrics["loc_err"] += metrics["loc_err"] * mp
+                running_metrics["cls_acc"] += (
+                    metrics["cls_acc"] * metrics["matched_pairs"]
+                )
                 running_metrics["matched_pairs"] += mp
             running_metrics["batches"] += 1
 
     # Average
-    for k in ("total", "loc", "cls"):
-        running_loss[k] /= max(running_loss["batches"], 1)
+    running_loss["total"] /= max(running_loss["batches"], 1)
+    running_loss["loc"] /= max(running_loss["batches"], 1)
+
     if running_metrics["matched_pairs"] > 0:
-        for k in ("loc_err", "cls_exact", "cls_elem_acc"):
-            running_metrics[k] /= running_metrics["matched_pairs"]
+        running_metrics["loc_err"] /= running_metrics["matched_pairs"]
+        running_metrics["cls_acc"] /= running_loss["batches"]
 
     print(f"\n{'=' * 60}")
     print("TEST RESULTS")
     print(f"{'=' * 60}")
     print(
         f"[TEST] Total {running_loss['total']:.4f} | "
-        f"Loc {running_loss['loc']:.4f} | Cls {running_loss['cls']:.4f} | "
+        f"Loc {running_loss['loc']:.4f} | "
         f"loc_err {running_metrics['loc_err']:.3f} | "
-        f"ClsExact {running_metrics['cls_exact']:.3f} | "
-        f"ClsElem {running_metrics['cls_elem_acc']:.3f}"
+        f"ClsAcc {running_metrics['cls_acc']:.3f}"
     )
     print(f"{'=' * 60}\n")
     return {**running_loss, **running_metrics}
@@ -723,7 +694,7 @@ def load_checkpoint_for_inference(checkpoint_path, device=None):
     return model, device, checkpoint_info
 
 
-def test_single_sample(model, sample_idx, dataset, device, cls_threshold=0.5):
+def test_single_sample(model, sample_idx, dataset, device, cls_threshold=0.15):
     """
     Test the model on a single sample from the dataset.
 
@@ -732,7 +703,7 @@ def test_single_sample(model, sample_idx, dataset, device, cls_threshold=0.5):
         sample_idx: Index of sample in dataset
         dataset: Dataset to get sample from
         device: Device to run inference on
-        cls_threshold: Threshold for classification predictions
+        cls_threshold: Threshold for determining if a class is active (based on coord norm)
 
     Returns:
         Dictionary with predictions and ground truth
@@ -747,16 +718,17 @@ def test_single_sample(model, sample_idx, dataset, device, cls_threshold=0.5):
 
     # Get prediction
     with torch.no_grad():
-        loc_out, cls_logit = model(spec_input)
-        loc_out = loc_out.squeeze(1).squeeze(0)  # Remove batch and seq dims -> [3]
-        cls_logit = cls_logit.squeeze(1).squeeze(0)  # -> [num_classes]
-        cls_prob = torch.sigmoid(cls_logit)
-        cls_pred = (cls_prob > cls_threshold).float()
+        coords = model(spec_input)  # [1, num_classes, 3]
+        coords = coords.squeeze(0)  # [num_classes, 3]
 
     # Move to CPU for display
-    loc_out = loc_out.cpu().numpy()
-    cls_prob = cls_prob.cpu().numpy()
-    cls_pred = cls_pred.cpu().numpy()
+    coords_np = coords.cpu().numpy()
+    num_classes = coords_np.shape[0]
+
+    # Infer classification from coordinate norms
+    coord_norms = np.linalg.norm(coords_np, axis=1)
+    cls_pred = (coord_norms > cls_threshold).astype(float)
+
     loc_target = (
         loc_target.numpy() if isinstance(loc_target, torch.Tensor) else loc_target
     )
@@ -764,25 +736,44 @@ def test_single_sample(model, sample_idx, dataset, device, cls_threshold=0.5):
         cls_target.numpy() if isinstance(cls_target, torch.Tensor) else cls_target
     )
 
-    # Compute metrics
-    loc_error = np.linalg.norm(loc_out - loc_target)
-    cls_exact_match = np.all(cls_pred == cls_target)
-    cls_element_acc = np.mean(cls_pred == cls_target)
-
-    # Get predicted class names
+    # Get predicted and target class indices
     predicted_classes = np.where(cls_pred > 0)[0]
     target_classes = np.where(cls_target > 0)[0]
+
+    # Compute metrics for active classes
+    if len(target_classes) > 0:
+        # Get ground truth location (assuming single source or first source)
+        loc_errors = []
+        for cls_idx in target_classes:
+            loc_pred = coords_np[cls_idx]
+            loc_err = np.linalg.norm(loc_pred - loc_target)
+            loc_errors.append(loc_err)
+        avg_loc_error = np.mean(loc_errors)
+    else:
+        avg_loc_error = 0.0
+
+    cls_exact_match = np.all(cls_pred == cls_target)
+    cls_element_acc = np.mean(cls_pred == cls_target)
 
     # Print results
     print(f"\n{'=' * 60}")
     print(f"SINGLE SAMPLE TEST - Sample Index: {sample_idx}")
     print(f"{'=' * 60}")
-    print(f"\n📍 LOCALIZATION:")
-    print(f"  Predicted: [{loc_out[0]:6.3f}, {loc_out[1]:6.3f}, {loc_out[2]:6.3f}]")
+
+    print(f"\n📍 LOCALIZATION (Ground Truth Location):")
     print(
         f"  Ground Truth: [{loc_target[0]:6.3f}, {loc_target[1]:6.3f}, {loc_target[2]:6.3f}]"
     )
-    print(f"  L2 Error: {loc_error:.4f}")
+
+    if len(target_classes) > 0:
+        print(f"\n  Predictions for active classes:")
+        for cls_idx in target_classes:
+            loc_pred = coords_np[cls_idx]
+            loc_err = np.linalg.norm(loc_pred - loc_target)
+            print(
+                f"    Class {cls_idx}: [{loc_pred[0]:6.3f}, {loc_pred[1]:6.3f}, {loc_pred[2]:6.3f}] | Error: {loc_err:.4f}"
+            )
+        print(f"  Average L2 Error: {avg_loc_error:.4f}")
 
     print(f"\n🏷️  CLASSIFICATION:")
     print(f"  Predicted Classes: {predicted_classes.tolist()}")
@@ -790,22 +781,24 @@ def test_single_sample(model, sample_idx, dataset, device, cls_threshold=0.5):
     print(f"  Exact Match: {'✓' if cls_exact_match else '✗'}")
     print(f"  Element Accuracy: {cls_element_acc:.3f}")
 
-    print(f"\n📊 TOP 5 CLASS PROBABILITIES:")
-    top5_indices = np.argsort(cls_prob)[-5:][::-1]
+    print(f"\n📊 TOP 5 CLASSES BY COORDINATE NORM:")
+    top5_indices = np.argsort(coord_norms)[-5:][::-1]
     for idx in top5_indices:
         marker = "✓" if cls_target[idx] > 0 else " "
-        print(f"  {marker} Class {idx:3d}: {cls_prob[idx]:.4f}")
+        print(
+            f"  {marker} Class {idx:3d}: norm={coord_norms[idx]:.4f} | coords=[{coords_np[idx, 0]:.3f}, {coords_np[idx, 1]:.3f}, {coords_np[idx, 2]:.3f}]"
+        )
 
     print(f"{'=' * 60}\n")
 
     return {
         "sample_idx": sample_idx,
-        "loc_pred": loc_out,
+        "coords_pred": coords_np,
         "loc_target": loc_target,
-        "loc_error": loc_error,
+        "loc_error": avg_loc_error,
         "cls_pred": cls_pred,
         "cls_target": cls_target,
-        "cls_prob": cls_prob,
+        "coord_norms": coord_norms,
         "cls_exact_match": cls_exact_match,
         "cls_element_acc": cls_element_acc,
     }
@@ -878,7 +871,7 @@ def preprocess_audio_for_inference(audio_path, max_duration=0.1):
     return preprocessed
 
 
-def test_audio_file(model, audio_path, device, cls_threshold=0.5, class_names=None):
+def test_audio_file(model, audio_path, device, cls_threshold=0.15, class_names=None):
     """
     Test the model on a single audio file loaded from disk.
 
@@ -886,7 +879,7 @@ def test_audio_file(model, audio_path, device, cls_threshold=0.5, class_names=No
         model: Trained model
         audio_path: Path to the audio file
         device: Device to run inference on
-        cls_threshold: Threshold for classification predictions
+        cls_threshold: Threshold for determining if a class is active (based on coord norm)
         class_names: Optional list of class names for better output
 
     Returns:
@@ -906,16 +899,16 @@ def test_audio_file(model, audio_path, device, cls_threshold=0.5, class_names=No
 
     # Get prediction
     with torch.no_grad():
-        loc_out, cls_logit = model(spec_input)
-        loc_out = loc_out.squeeze(1).squeeze(0)  # Remove batch and seq dims -> [3]
-        cls_logit = cls_logit.squeeze(1).squeeze(0)  # -> [num_classes]
-        cls_prob = torch.sigmoid(cls_logit)
-        cls_pred = (cls_prob > cls_threshold).float()
+        coords = model(spec_input)  # [1, num_classes, 3]
+        coords = coords.squeeze(0)  # [num_classes, 3]
 
     # Move to CPU for display
-    loc_out = loc_out.cpu().numpy()
-    cls_prob = cls_prob.cpu().numpy()
-    cls_pred = cls_pred.cpu().numpy()
+    coords_np = coords.cpu().numpy()
+    num_classes = coords_np.shape[0]
+
+    # Infer classification from coordinate norms
+    coord_norms = np.linalg.norm(coords_np, axis=1)
+    cls_pred = (coord_norms > cls_threshold).astype(float)
 
     # Get predicted class indices
     predicted_classes = np.where(cls_pred > 0)[0]
@@ -926,11 +919,6 @@ def test_audio_file(model, audio_path, device, cls_threshold=0.5, class_names=No
     print(f"{'=' * 60}")
     print(f"File: {audio_path}")
 
-    print(f"\n📍 PREDICTED LOCALIZATION:")
-    print(f"  Azimuth (x):   {loc_out[0]:7.3f}")
-    print(f"  Elevation (y): {loc_out[1]:7.3f}")
-    print(f"  Distance (z):  {loc_out[2]:7.3f}")
-
     print(f"\n🏷️  PREDICTED CLASSES (threshold={cls_threshold}):")
     if len(predicted_classes) > 0:
         for idx in predicted_classes:
@@ -939,29 +927,35 @@ def test_audio_file(model, audio_path, device, cls_threshold=0.5, class_names=No
                 if class_names and idx < len(class_names)
                 else f"Class {idx}"
             )
-            print(f"  ✓ {class_name}: {cls_prob[idx]:.4f}")
+            loc = coords_np[idx]
+            print(
+                f"  ✓ {class_name}: norm={coord_norms[idx]:.4f} | loc=[{loc[0]:.3f}, {loc[1]:.3f}, {loc[2]:.3f}]"
+            )
     else:
         print(f"  (No classes above threshold)")
 
-    print(f"\n📊 TOP 10 CLASS PROBABILITIES:")
-    top10_indices = np.argsort(cls_prob)[-10:][::-1]
+    print(f"\n📊 TOP 10 CLASSES BY COORDINATE NORM:")
+    top10_indices = np.argsort(coord_norms)[-10:][::-1]
     for idx in top10_indices:
         class_name = (
             class_names[idx]
             if class_names and idx < len(class_names)
             else f"Class {idx}"
         )
-        bar_length = int(cls_prob[idx] * 30)
+        loc = coords_np[idx]
+        bar_length = int(min(coord_norms[idx], 1.0) * 30)
         bar = "█" * bar_length + "░" * (30 - bar_length)
-        print(f"  {class_name:20s} {bar} {cls_prob[idx]:.4f}")
+        print(
+            f"  {class_name:20s} {bar} norm={coord_norms[idx]:.4f} | loc=[{loc[0]:.3f}, {loc[1]:.3f}, {loc[2]:.3f}]"
+        )
 
     print(f"{'=' * 60}\n")
 
     return {
         "audio_path": audio_path,
-        "loc_pred": loc_out,
+        "coords_pred": coords_np,
+        "coord_norms": coord_norms,
         "cls_pred": cls_pred,
-        "cls_prob": cls_prob,
         "predicted_classes": predicted_classes,
     }
 

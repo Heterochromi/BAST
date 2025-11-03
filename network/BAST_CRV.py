@@ -401,7 +401,6 @@ class BAST_CRV_Simple(nn.Module):
             dropout=dropout,
         )
 
-        # Simple pooling and prediction heads (no DETR decoder)
         self.pool = nn.AdaptiveAvgPool1d(1)  # Pool over sequence dimension
 
         self.prediction_head = nn.Sequential(
@@ -409,12 +408,8 @@ class BAST_CRV_Simple(nn.Module):
             nn.Linear(dim, mlp_dim),
             nn.GELU(),
             nn.Dropout(dropout),
+            nn.Linear(mlp_dim, self.num_classes_cls * self.num_coordinates_output),
         )
-
-        self.loc_head = nn.Linear(
-            mlp_dim, self.num_classes_cls * self.num_coordinates_output
-        )
-        self.cls_head = nn.Linear(mlp_dim, self.num_classes_cls)
 
     def forward(self, img):
         # Input: [B, 2, 2, H, W] (stereo spectrogram with real/imag split)
@@ -456,18 +451,13 @@ class BAST_CRV_Simple(nn.Module):
         x = x.transpose(1, 2)  # [B, dim, N]
         x = self.pool(x)  # [B, dim, 1]
         x = x.squeeze(-1)  # [B, dim]
+        # Predict coordinates for all classes from the pooled features
+        coords = self.prediction_head(x)
 
-        # Predict from pooled features
-        features = self.prediction_head(x)  # [B, mlp_dim]
+        # Reshape to (Batch, Num Classes, Num Coordinates)
+        coords = coords.view(B, self.num_classes_cls, self.num_coordinates_output)
 
-        # Location head predicts coordinates for all classes
-        loc_out = self.loc_head(features)  # [B, num_classes * num_coords]
-        loc_out = loc_out.view(
-            B, self.num_classes_cls, self.num_coordinates_output
-        )  # [B, num_classes, num_coords]
-        loc_out = torch.tanh(loc_out)
+        # Apply tanh activation to constrain output to [-1, 1]
+        coords = torch.tanh(coords)
 
-        # Classification head predicts confidence for each class
-        cls_logit = self.cls_head(features)  # [B, num_classes]
-
-        return loc_out, cls_logit
+        return coords
