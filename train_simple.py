@@ -15,12 +15,12 @@ from raw_spec import generate_raw_spectrogram_torch_tensor
 # %%
 # Configuration for simple (non-DETR) model
 CSV_PATH = "tensor_metadata_complex.csv"
-SPECTROGRAM_SIZE = [129, 18]  # [Freq (n_mels), Time frames]
+SPECTROGRAM_SIZE = [129, 19]  # [Freq (n_mels), Time frames]
 NUM_OUTPUT = 3  # e.g., (x, y, z)
 EMBEDDING_DIM = 512
-TRANSFORMER_ENCODER_DEPTH = 6
-TRANSFORMER_HEADS = 4
-TRANSFORMER_MLP_RATIO = 2
+TRANSFORMER_ENCODER_DEPTH = 4
+TRANSFORMER_HEADS = 2
+TRANSFORMER_MLP_RATIO = 1
 DROPOUT = 0.05
 EMB_DROPOUT = 0.05
 PATCH_SIZE = 6
@@ -31,7 +31,7 @@ LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-4
 EPOCHS = 60
 BATCH_SIZE = 200
-TEST_SPLIT = 0.1
+TEST_SPLIT = 0.5
 VAL_SPLIT = 0.3
 SEED = 42
 NUM_WORKERS = 4
@@ -44,9 +44,6 @@ MODEL_NAME = "BAST_CRV_SIMPLE"
 CHECKPOINT_PATH = None  # Set to path to resume training
 START_EPOCH = 1
 
-# Loss weights
-LOC_WEIGHT = 1.0
-CLS_WEIGHT = 1.0
 
 # %%
 # Data setup
@@ -243,6 +240,7 @@ def compute_metrics(outputs, loc_lists, cls_lists, threshold=0.5):
     total_loc_err = 0.0
     total_cls_correct = 0.0
     total_cls_count = 0
+    total_exact_matches = 0
     num_samples = 0
 
     for i in range(B):
@@ -278,6 +276,9 @@ def compute_metrics(outputs, loc_lists, cls_lists, threshold=0.5):
         pred_active = torch.sqrt(torch.sum(pred**2, dim=1)) > threshold
         cls_correct = (pred_active == gt_active_classes).float().sum().item()
 
+        if (pred_active == gt_active_classes).all():
+            total_exact_matches += 1
+
         total_cls_correct += cls_correct
         total_cls_count += num_classes
 
@@ -285,12 +286,14 @@ def compute_metrics(outputs, loc_lists, cls_lists, threshold=0.5):
         return {
             "loc_err": total_loc_err / num_samples,
             "cls_acc": total_cls_correct / total_cls_count,
+            "exact_match_acc": total_exact_matches / B,
             "matched_pairs": num_samples,
         }
     else:
         return {
             "loc_err": 0.0,
             "cls_acc": 0.0,
+            "exact_match_acc": 0.0,
             "matched_pairs": 0,
         }
 
@@ -302,6 +305,7 @@ def validate(net, epoch, loc_criterion, device):
     running_metrics = {
         "loc_err": 0.0,
         "cls_acc": 0.0,
+        "exact_match_acc": 0.0,
         "matched_pairs": 0,
         "batches": 0,
     }
@@ -318,13 +322,12 @@ def validate(net, epoch, loc_criterion, device):
             running_loss["batches"] += 1
 
             metrics = compute_metrics(outputs, loc_lists, cls_lists, CLS_THRESHOLD)
+            running_metrics["exact_match_acc"] += metrics["exact_match_acc"]
             mp = metrics["matched_pairs"]
             if mp > 0:
                 running_metrics["loc_err"] += metrics["loc_err"] * mp
                 running_metrics["cls_acc"] += (
-                    metrics["cls_acc"] * metrics["matched_pairs"]
-                    if "cls_acc" in metrics
-                    else 0
+                    metrics["cls_acc"] if "cls_acc" in metrics else 0
                 )
                 running_metrics["matched_pairs"] += mp
             running_metrics["batches"] += 1
@@ -336,12 +339,14 @@ def validate(net, epoch, loc_criterion, device):
     if running_metrics["matched_pairs"] > 0:
         running_metrics["loc_err"] /= running_metrics["matched_pairs"]
         running_metrics["cls_acc"] /= running_loss["batches"]
+    running_metrics["exact_match_acc"] /= max(running_loss["batches"], 1)
 
     print(
         f"[VAL] Epoch {epoch} | Total {running_loss['total']:.4f} | "
         f"Loc {running_loss['loc']:.4f} | "
         f"loc_err {running_metrics['loc_err']:.3f} | "
-        f"ClsAcc {running_metrics['cls_acc']:.3f}"
+        f"ClsAcc {running_metrics['cls_acc'] * 100:.1f}% | "
+        f"ExactMatch {running_metrics['exact_match_acc'] * 100:.1f}%"
     )
     return {**running_loss, **running_metrics}
 
@@ -426,6 +431,7 @@ for epoch in range(START_EPOCH, EPOCHS + 1):
     epoch_metrics = {
         "loc_err": 0.0,
         "cls_acc": 0.0,
+        "exact_match_acc": 0.0,
         "matched_pairs": 0,
         "batches": 0,
     }
@@ -474,10 +480,11 @@ for epoch in range(START_EPOCH, EPOCHS + 1):
 
         # Metrics
         metrics = compute_metrics(outputs, loc_lists, cls_lists, CLS_THRESHOLD)
+        epoch_metrics["exact_match_acc"] += metrics["exact_match_acc"]
         mp = metrics["matched_pairs"]
         if mp > 0:
             epoch_metrics["loc_err"] += metrics["loc_err"] * mp
-            epoch_metrics["cls_acc"] += metrics["cls_acc"] * metrics["matched_pairs"]
+            epoch_metrics["cls_acc"] += metrics["cls_acc"]
             epoch_metrics["matched_pairs"] += mp
         epoch_metrics["batches"] += 1
 
@@ -488,6 +495,7 @@ for epoch in range(START_EPOCH, EPOCHS + 1):
     if epoch_metrics["matched_pairs"] > 0:
         epoch_metrics["loc_err"] /= epoch_metrics["matched_pairs"]
         epoch_metrics["cls_acc"] /= epoch_losses["batches"]
+    epoch_metrics["exact_match_acc"] /= max(epoch_losses["batches"], 1)
 
     avg_grad_norm = sum(grad_norms) / len(grad_norms) if grad_norms else 0.0
 
@@ -498,7 +506,8 @@ for epoch in range(START_EPOCH, EPOCHS + 1):
         f"[TRAIN] Total {epoch_losses['total']:.4f} | "
         f"Loc {epoch_losses['loc']:.4f} | "
         f"loc_err {epoch_metrics['loc_err']:.3f} | "
-        f"ClsAcc {epoch_metrics['cls_acc']:.3f}"
+        f"ClsAcc {epoch_metrics['cls_acc'] * 100:.1f}% | "
+        f"ExactMatch {epoch_metrics['exact_match_acc'] * 100:.1f}%"
     )
     print(f"  Avg Grad Norm: {avg_grad_norm:.4f}")
     print(f"  Final LR this epoch: {optimizer.param_groups[0]['lr']:.2e}")
@@ -578,6 +587,7 @@ def test():
     running_metrics = {
         "loc_err": 0.0,
         "cls_acc": 0.0,
+        "exact_match_acc": 0.0,
         "matched_pairs": 0,
         "batches": 0,
     }
@@ -594,12 +604,11 @@ def test():
             running_loss["batches"] += 1
 
             metrics = compute_metrics(outputs, loc_lists, cls_lists, CLS_THRESHOLD)
+            running_metrics["exact_match_acc"] += metrics["exact_match_acc"]
             mp = metrics["matched_pairs"]
             if mp > 0:
                 running_metrics["loc_err"] += metrics["loc_err"] * mp
-                running_metrics["cls_acc"] += (
-                    metrics["cls_acc"] * metrics["matched_pairs"]
-                )
+                running_metrics["cls_acc"] += metrics["cls_acc"]
                 running_metrics["matched_pairs"] += mp
             running_metrics["batches"] += 1
 
@@ -610,6 +619,7 @@ def test():
     if running_metrics["matched_pairs"] > 0:
         running_metrics["loc_err"] /= running_metrics["matched_pairs"]
         running_metrics["cls_acc"] /= running_loss["batches"]
+    running_metrics["exact_match_acc"] /= max(running_loss["batches"], 1)
 
     print(f"\n{'=' * 60}")
     print("TEST RESULTS")
@@ -618,7 +628,8 @@ def test():
         f"[TEST] Total {running_loss['total']:.4f} | "
         f"Loc {running_loss['loc']:.4f} | "
         f"loc_err {running_metrics['loc_err']:.3f} | "
-        f"ClsAcc {running_metrics['cls_acc']:.3f}"
+        f"ClsAcc {running_metrics['cls_acc'] * 100:.1f}% | "
+        f"ExactMatch {running_metrics['exact_match_acc'] * 100:.1f}%"
     )
     print(f"{'=' * 60}\n")
     return {**running_loss, **running_metrics}
