@@ -1,8 +1,7 @@
 import torchaudio
 import torchaudio.transforms as T
 import torch
-import matplotlib.pyplot as plt
-import numpy as np
+
 
 class btff_transoform:
     def __init__(self , input_audio_path , n_fft = 1024 , n_mels = 128 , fmin = 0 ,fmax = 16000):
@@ -88,13 +87,13 @@ class btff_transoform:
         return self.mel_fb(ITD_spectra)
 
 
-    def ILD_spect(self, stop_freq=5000):
-        stopbin = int(round(stop_freq/self.bin_width))
+    def ILD_spect(self, start_freq=5000):
+        startbin = int(round(start_freq/self.bin_width))
         left_mag  = self.left_mag.clone()
         right_mag = self.right_mag.clone()
 
-        left_mag[stopbin:, :] = self.eps
-        right_mag[stopbin:, :] = self.eps
+        left_mag[:startbin, :] = self.eps
+        right_mag[:startbin, :] = self.eps
 
         ILD_spectra = (20 * torch.log10(left_mag)) - (20 * torch.log10(right_mag))
 
@@ -130,15 +129,15 @@ class btff_transoform:
         return mel_left , mel_right , v_map_left , v_map_right
 
 
-    def sc_map(self, stop_freq=5000):
+    def sc_map(self, start_freq = 5000):
 
-        stoptbin = int(round(stop_freq/self.bin_width))
+        starttbin = int(round(start_freq/self.bin_width))
 
         left_mag  = self.left_mag.clone()
         right_mag = self.right_mag.clone()
 
-        left_mag[stoptbin:, :] = self.eps
-        right_mag[stoptbin:, :] = self.eps
+        left_mag[:starttbin, :] = self.eps
+        right_mag[:starttbin, :] = self.eps
 
         # sc_map_left = left_mag.pow(2)
         # sc_map_right = right_mag.pow(2)
@@ -164,17 +163,19 @@ class btff_transoform:
 
 
 if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+    import numpy as np
 
-    path = "/home/baraa/Desktop/BAST/dataset_parallel/sample_0001.wav"
+    path = "/home/baraa/Desktop/BAST/dataset_parallel/sample_0026.wav"
 
     # Initialize the BTFF transform
     btff = btff_transoform(path , fmax = 16000)
 
     # Generate all outputs
     itd_spectra = btff.ITD_spect(start_freq=0, stop_freq=1500)
-    ild_spectra = btff.ILD_spect(stop_freq=5000)
+    ild_spectra = btff.ILD_spect(start_freq=5000)
     mel_left, mel_right, v_map_left, v_map_right = btff.mel_log_spectrogram_and_vmap()
-    sc_map_left, sc_map_right = btff.sc_map(stop_freq=5000)
+    sc_map_left, sc_map_right = btff.sc_map(start_freq=5000)
 
     # Create a figure with subplots
     fig, axes = plt.subplots(4, 2, figsize=(16, 20))
