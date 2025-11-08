@@ -78,11 +78,13 @@ class btff_transoform:
                 wrapped_phase_diff = torch.remainder(phasediff + torch.pi, 2 * torch.pi) - torch.pi
 
                 if bin == 0:
-                    bin = 1
+                    bindelay = wrapped_phase_diff / (2 * torch.pi * self.bin_width)
+                else:
+                    bindelay = wrapped_phase_diff / (
+                        2 * torch.pi * self.bin_width * bin
+                    )
 
-                bindelay = wrapped_phase_diff / (2 * torch.pi * self.bin_width * bin)
-
-                if self.intensity[bin , frame] >= self.eps:
+                if self.intensity[bin, frame] >= self.eps:
                     ITD_spectra[bin, frame] = bindelay
         return self.mel_fb(ITD_spectra)
 
